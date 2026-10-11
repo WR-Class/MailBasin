@@ -18,6 +18,139 @@ func newExternalFixture(t *testing.T) *Service {
 }
 
 // 用户实际粘贴的就是 Markdown 表格，必须能直接解析。
+// 这是抽奖平台实际发的奖品文件格式，一个文件一个奖品。
+func TestParseExternalMailboxLinesAcceptsLotteryPrizeJSON(t *testing.T) {
+	raw := `{
+  "value": "tippet_crooked_7j@icloud.com----https://ic-mail.example.com/api/v1/access/TOKEN/mailboxes/tippet_crooked_7j@icloud.com/code"
+}`
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 1 || skipped != 0 {
+		t.Fatalf("应解析出 1 条且无跳过，实际 %d 条 / %d 跳过", len(items), skipped)
+	}
+	if items[0].Email != "tippet_crooked_7j@icloud.com" {
+		t.Fatalf("邮箱不正确：%q", items[0].Email)
+	}
+	// 关键：取码地址必须是干净的那一半，不能把邮箱或分隔符带进去。
+	if !strings.HasPrefix(items[0].CodeAPIURL, "https://ic-mail.example.com/api/v1/access/TOKEN/") {
+		t.Fatalf("取码地址不正确：%q", items[0].CodeAPIURL)
+	}
+	if strings.Contains(items[0].CodeAPIURL, "----") || strings.Contains(items[0].CodeAPIURL, "@icloud.com----") {
+		t.Fatalf("取码地址里残留了分隔符或邮箱：%q", items[0].CodeAPIURL)
+	}
+}
+
+// 多个奖品文件的内容拼在一起也要能一次导入。
+func TestParseExternalMailboxLinesAcceptsJSONArray(t *testing.T) {
+	raw := `[
+  {"value": "a@icloud.com----https://host/access/T1/mailboxes/a@icloud.com/code"},
+  {"value": "b@icloud.com----https://host/access/T2/mailboxes/b@icloud.com/code"},
+  {"value": "c@icloud.com----https://host/access/T3/mailboxes/c@icloud.com/code"}
+]`
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 3 || skipped != 0 {
+		t.Fatalf("应解析出 3 条，实际 %d 条 / %d 跳过", len(items), skipped)
+	}
+	if items[0].Email != "a@icloud.com" || items[2].Email != "c@icloud.com" {
+		t.Fatalf("顺序或内容不对：%+v", items)
+	}
+}
+
+// 发奖平台换个字段名不该让导入失效。
+func TestParseExternalMailboxLinesDoesNotHardcodeTheValueField(t *testing.T) {
+	for _, raw := range []string{
+		`{"prize": "x@icloud.com----https://host/access/T/mailboxes/x@icloud.com/code"}`,
+		`{"data": {"code_url": "x@icloud.com----https://host/access/T/mailboxes/x@icloud.com/code"}}`,
+		`{"a": ["x@icloud.com----https://host/access/T/mailboxes/x@icloud.com/code"]}`,
+	} {
+		items, _ := ParseExternalMailboxLines(raw)
+		if len(items) != 1 || items[0].Email != "x@icloud.com" {
+			t.Fatalf("字段名换掉后解析失败：%s -> %+v", raw, items)
+		}
+	}
+}
+
+// 以花括号开头但不是合法 JSON 时，必须退回按文本处理，而不是整段丢掉。
+func TestParseExternalMailboxLinesFallsBackWhenBracesAreNotJSON(t *testing.T) {
+	raw := "{备注} a@icloud.com https://host/access/T/mailboxes/a@icloud.com/code"
+	items, _ := ParseExternalMailboxLines(raw)
+	if len(items) != 1 || items[0].Email != "a@icloud.com" {
+		t.Fatalf("非法 JSON 应退回文本解析：%+v", items)
+	}
+}
+
+// 分隔符一旦出现就按机器格式严格判：左侧混进别的东西时整条丢掉，
+// 而不是猜出里面的邮箱——猜错会导入一个错的地址，而且没人会注意到。
+func TestParseExternalMailboxLinesRejectsJunkAroundTheSeparator(t *testing.T) {
+	raw := `{"value": "{备注} a@icloud.com----https://host/access/T/mailboxes/a@icloud.com/code"}`
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 0 || skipped != 1 {
+		t.Fatalf("分隔符两侧不干净时应整条跳过：%+v（跳过 %d）", items, skipped)
+	}
+}
+
+// 分隔符写法不能把原来的 Markdown 表格和纯文本写法弄坏。
+func TestParseExternalMailboxLinesSeparatorDoesNotBreakOtherForms(t *testing.T) {
+	raw := "a@icloud.com https://host/access/T1/mailboxes/a@icloud.com/code\n" +
+		"| 2 | `b@icloud.com` | [链接](https://host/access/T2/mailboxes/b@icloud.com/code) |\n" +
+		"c@icloud.com----https://host/access/T3/mailboxes/c@icloud.com/code\n"
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 3 || skipped != 0 {
+		t.Fatalf("三种写法应都认，实际 %d 条 / %d 跳过", len(items), skipped)
+	}
+	for _, item := range items {
+		if !strings.HasPrefix(item.CodeAPIURL, "https://host/access/") {
+			t.Fatalf("取码地址被弄脏了：%q", item.CodeAPIURL)
+		}
+	}
+}
+
+// 分隔符出现在但两侧不成对时，不能硬拆出一条垃圾记录。
+func TestParseExternalMailboxLinesRejectsHalfPair(t *testing.T) {
+	for _, raw := range []string{
+		`{"value": "只有邮箱 a@icloud.com----"}`,
+		`{"value": "----https://host/access/T/mailboxes/a@icloud.com/code"}`,
+		`{"value": "not-an-email----https://host/code"}`,
+	} {
+		items, skipped := ParseExternalMailboxLines(raw)
+		if len(items) != 0 || skipped != 1 {
+			t.Fatalf("半条记录应被跳过：%s -> %d 条 / %d 跳过", raw, len(items), skipped)
+		}
+	}
+}
+
+// 选中多个奖品文件时，内容是首尾相接的多个 JSON 文档，而不是一个数组。
+// 这是实际用起来最容易踩的形态：整段 Unmarshal 会失败并让导入全部报废。
+func TestParseExternalMailboxLinesAcceptsConcatenatedPrizeDocuments(t *testing.T) {
+	raw := `{
+  "value": "tippet_crooked_7j@icloud.com----https://host/access/T1/mailboxes/tippet_crooked_7j@icloud.com/code"
+}
+{
+  "value": "labels_rubies.7t@icloud.com----https://host/access/T2/mailboxes/labels_rubies.7t@icloud.com/code"
+}
+{
+  "value": "gorge-layman.0i@icloud.com----https://host/access/T3/mailboxes/gorge-layman.0i@icloud.com/code"
+}`
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 3 || skipped != 0 {
+		t.Fatalf("拼接的奖品文档应解析出 3 条，实际 %d 条 / %d 跳过", len(items), skipped)
+	}
+	// 顺序按文件顺序，方便人对照。
+	if items[0].Email != "tippet_crooked_7j@icloud.com" || items[2].Email != "gorge-layman.0i@icloud.com" {
+		t.Fatalf("顺序或内容不对：%+v", items)
+	}
+}
+
+// 尾部混进垃圾时，前面已经读出来的文档仍然要保住。
+func TestParseExternalMailboxLinesKeepsValidDocumentsBeforeTrailingJunk(t *testing.T) {
+	raw := `{"value": "a@icloud.com----https://host/access/T1/mailboxes/a@icloud.com/code"}
+<<<这里不是 JSON>>>
+{"value": "b@icloud.com----https://host/access/T2/mailboxes/b@icloud.com/code"}`
+	items, _ := ParseExternalMailboxLines(raw)
+	if len(items) != 1 || items[0].Email != "a@icloud.com" {
+		t.Fatalf("应保住垃圾之前的那一条：%+v", items)
+	}
+}
+
 func TestParseExternalMailboxLinesHandlesMarkdownTable(t *testing.T) {
 	raw := "序号邮箱地址访问链接\n" +
 		"1`tippet_crooked_7j@icloud.com`[https://ic-mail.example.com/api/v1/access/AAA/mailboxes/tippet_crooked_7j@icloud.com/code](https://ic-mail.example.com/api/v1/access/AAA/mailboxes/tippet_crooked_7j@icloud.com/code)\n" +

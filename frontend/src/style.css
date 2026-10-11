@@ -1353,6 +1353,16 @@ textarea.field {
   white-space: nowrap;
 }
 
+/* 隐藏的文件选择框：由旁边的按钮代为触发，样式不参与布局。 */
+.mailbox-hidden-file {
+  display: none;
+}
+
+/* 对话框里需要占满整行的字段。 */
+.mailbox-dialog-grid > .mailbox-dialog-wide {
+  grid-column: 1 / -1;
+}
+
 .apple-auth-field {
   position: relative;
   display: block;

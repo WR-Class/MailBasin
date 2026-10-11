@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Boxes, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Clipboard, CloudDownload, CloudOff, KeyRound, LoaderCircle, MailOpen, MailPlus, RefreshCw, Save, Search, ShieldX, Trash2, X } from '@lucide/vue'
+import { Boxes, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Clipboard, CloudDownload, CloudOff, FileUp, KeyRound, LoaderCircle, MailOpen, MailPlus, RefreshCw, Save, Search, ShieldX, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import CardSelect from '../components/CardSelect.vue'
 import FormDialog from '../components/FormDialog.vue'
@@ -584,24 +584,132 @@ function openExternalImportDialog() {
   showExternalImport.value = true
 }
 
-// 从粘贴内容里预览能解析出几条。服务端会再解析一次，这里只为让人提交前看清。
-const externalPreviewCount = computed(() => {
+// 抽奖平台发奖文件的固定分隔符：邮箱----取码地址。
+const EXTERNAL_PAIR_SEPARATOR = '----'
+
+const externalFileInput = ref(null)
+
+// 把「拼在一起的多个 JSON 文档」切成一个个文档。
+// 选中多个奖品文件时它们就是首尾相接的，整段 JSON.parse 会直接失败。
+function splitJSONDocuments(text) {
+  const documents = []
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+    } else if (ch === '{' || ch === '[') {
+      if (depth === 0) start = i
+      depth += 1
+    } else if (ch === '}' || ch === ']') {
+      depth -= 1
+      if (depth <= 0) {
+        if (depth === 0 && start >= 0) documents.push(text.slice(start, i + 1))
+        depth = 0
+        start = -1
+      }
+    }
+  }
+  return documents
+}
+
+// 把粘贴文本或奖品文件内容解析成「邮箱 + 取码地址」。
+// 后端 ParseExternalMailboxLines 是同一套规则；这里只为让人提交前看清会导入几条。
+function extractExternalPairs(raw) {
+  const source = String(raw || '').trim()
+  if (!source) return []
+  let candidates = null
+  if (source.startsWith('{') || source.startsWith('[')) {
+    const collected = []
+    const walk = (value) => {
+      if (typeof value === 'string') collected.push(value)
+      else if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value === 'object') Object.keys(value).sort().forEach((key) => walk(value[key]))
+    }
+    for (const document of splitJSONDocuments(source)) {
+      try {
+        walk(JSON.parse(document))
+      } catch {
+        // 单个文档坏了不影响已经读出来的，和后端 Decoder 的行为一致。
+      }
+    }
+    if (collected.length) candidates = collected
+  }
+  if (!candidates) candidates = source.split(/\r?\n/)
+
   const seen = new Set()
-  return String(externalImport.raw || '')
-    .split(/\r?\n/)
-    .filter((line) => {
-      const email = (line.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [])[0]
-      const url = /https?:\/\/\S+/.test(line)
-      if (!email || !url || seen.has(email.toLowerCase())) return false
-      seen.add(email.toLowerCase())
-      return true
-    }).length
-})
+  const pairs = []
+  for (const candidate of candidates) {
+    const text = String(candidate || '').trim()
+    if (!text) continue
+    let email = ''
+    let url = ''
+    const separator = text.indexOf(EXTERNAL_PAIR_SEPARATOR)
+    if (separator > 0) {
+      const left = text.slice(0, separator).trim()
+      const right = text.slice(separator + EXTERNAL_PAIR_SEPARATOR.length).trim()
+      if (/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(left) && /^https?:\/\/\S+$/.test(right)) {
+        email = left
+        url = right
+      }
+    }
+    if (!email) {
+      email = (text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [''])[0]
+      url = (text.match(/https?:\/\/[^\s)\]|<>"']+/) || [''])[0]
+    }
+    if (!email || !url) continue
+    const key = email.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    pairs.push({ email: key, url })
+  }
+  return pairs
+}
+
+const externalPreviewCount = computed(() => extractExternalPairs(externalImport.raw).length)
+
+// 读取选中的奖品 JSON 文件，把内容追加进同一个文本框——
+// 两条入口共用一套解析规则，不维护第二份逻辑。
+async function pickExternalFiles(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  if (!files.length) return
+  const chunks = []
+  const unreadable = []
+  for (const file of files) {
+    try {
+      const text = (await file.text()).trim()
+      if (text) chunks.push(text)
+      else unreadable.push(file.name)
+    } catch {
+      unreadable.push(file.name)
+    }
+  }
+  if (chunks.length) {
+    externalImport.raw = [externalImport.raw.trim(), ...chunks].filter(Boolean).join('\n')
+  }
+  const parts = [`已读取 ${chunks.length} 个文件`]
+  if (unreadable.length) parts.push(`${unreadable.length} 个读取失败：${unreadable.slice(0, 3).join('、')}`)
+  flash(parts.join('，'), unreadable.length > 0)
+}
 
 // 导入只有取件接口的裸邮箱。没有母号也没有密码，唯一的凭据是取码地址里的令牌。
 async function importExternalMailboxes() {
   if (!externalImport.raw.trim()) {
-    flash('请粘贴至少一行「邮箱地址 + 取码地址」', true)
+    flash('请粘贴内容或选择奖品 JSON 文件', true)
+    return
+  }
+  if (!externalPreviewCount.value) {
+    flash('没能从这些内容里解析出任何「邮箱 + 取码地址」，请检查格式', true)
     return
   }
   if (!startBusy('external-import')) return
@@ -617,7 +725,7 @@ async function importExternalMailboxes() {
     const result = payload.result || {}
     const parts = [`新增 ${result.created || 0} 个`, `更新 ${result.updated || 0} 个`]
     if (result.failed) parts.push(`失败 ${result.failed} 个`)
-    if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 行`)
+    if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 条`)
     flash(`外部邮箱导入完成：${parts.join('，')}`, Boolean(result.failed))
     if (!result.failed) showExternalImport.value = false
     await load()
@@ -1546,12 +1654,24 @@ onBeforeUnmount(() => {
         <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="external-import-title" @submit.prevent="importExternalMailboxes">
           <header class="mailbox-dialog-heading"><div><h2 id="external-import-title"><CloudDownload :size="18" />导入外部取码邮箱</h2><p>适用于没有母号、也没有登录密码，只有一个取件接口的邮箱。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('external-import')" @click="showExternalImport = false"><X :size="16" /></button></header>
           <div class="mailbox-dialog-grid">
-            <label class="form-group mailbox-dialog-wide"><span class="form-label">粘贴邮箱和取码地址</span><textarea v-model="externalImport.raw" class="field font-mono" rows="7" placeholder="tippet_crooked_7j@icloud.com https://ic-mail.example.com/api/v1/access/TOKEN/mailboxes/tippet_crooked_7j@icloud.com/code" required></textarea><span class="form-help">每行一条，邮箱地址和取码链接顺序随意，Markdown 表格也能直接粘。已解析出 <strong>{{ externalPreviewCount }}</strong> 条。取码地址里含访问令牌，保存时会加密。</span></label>
+            <div class="form-group mailbox-dialog-wide">
+              <span class="form-label">方式一：粘贴内容</span>
+              <textarea v-model="externalImport.raw" class="field font-mono" rows="6" placeholder="tippet_crooked_7j@icloud.com https://ic-mail.example.com/api/v1/access/TOKEN/mailboxes/tippet_crooked_7j@icloud.com/code"></textarea>
+            </div>
+            <div class="form-group mailbox-dialog-wide">
+              <span class="form-label">方式二：选择奖品 JSON 文件（可多选）</span>
+              <div class="apple-inline-field">
+                <button type="button" class="secondary-button" @click="externalFileInput?.click()"><FileUp :size="14" />选择文件</button>
+                <input ref="externalFileInput" type="file" accept=".json,application/json" multiple class="mailbox-hidden-file" @change="pickExternalFiles" />
+                <span class="form-help">读到的内容会填进上面的框，两种方式可以混用。</span>
+              </div>
+            </div>
             <label class="form-group"><span class="form-label">标签</span><input v-model.trim="externalImport.label" class="field" placeholder="留空则用邮箱地址" /></label>
             <label class="form-group"><span class="form-label">备注</span><input v-model.trim="externalImport.note" class="field" placeholder="可选" /></label>
           </div>
+          <p class="apple-dialog-intro">已解析出 <strong>{{ externalPreviewCount }}</strong> 条。两种方式都认：直接粘贴的文本（含 Markdown 表格）和奖品 JSON（<code>{"value":"邮箱----取码地址"}</code>，单个或数组都行）。取码地址里含访问令牌，保存时会加密。</p>
           <p class="apple-dialog-intro">这类邮箱取信靠的是那个接口令牌，不是 Apple 登录态：导入时会先探活一次并如实报告结果，令牌失效会直接说明，不会伪装成「还没收到验证码」。导入后在邮箱池里点「同步」即可取码。</p>
-          <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('external-import')" @click="showExternalImport = false">取消</button><button class="primary-button" :disabled="isBusy('external-import')"><LoaderCircle v-if="isBusy('external-import')" :size="15" class="animate-spin" /><CloudDownload v-else :size="15" />导入 {{ externalPreviewCount }} 个邮箱</button></footer>
+          <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('external-import')" @click="showExternalImport = false">取消</button><button class="primary-button" :disabled="isBusy('external-import') || !externalPreviewCount"><LoaderCircle v-if="isBusy('external-import')" :size="15" class="animate-spin" /><CloudDownload v-else :size="15" />导入 {{ externalPreviewCount }} 个邮箱</button></footer>
         </form>
       </div>
 

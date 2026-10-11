@@ -2,11 +2,14 @@ package mailbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -249,33 +252,143 @@ var (
 	externalURLPattern   = regexp.MustCompile(`https?://[^\s)\]|<>"'` + "`" + `]+`)
 )
 
-// ParseExternalMailboxLines 把多行粘贴解析成导入项。
+// externalPairSeparator 是抽奖平台发奖文件里的分隔符：邮箱----取码地址。
+const externalPairSeparator = "----"
+
+// ParseExternalMailboxLines 把粘贴内容或奖品文件解析成导入项。
 //
-// 支持这些写法（可混用）：
+// 两种来源都走这里，因为解析规则本来就该是同一套：
+//
+// ① 直接粘贴文本，支持这些写法（可混用）：
 //
 //	tippet_crooked_7j@icloud.com https://host/api/v1/access/TOKEN/mailboxes/.../code
 //	labels_rubies.7t@icloud.com,https://host/...
 //	| 3 | `gorge-layman.0i@icloud.com` | [链接](https://host/...) |
+//	tippet_crooked_7j@icloud.com----https://host/...
 //
-// 解析不出邮箱或取码链接的行会被跳过，跳过数由调用方报告，不静默吞掉。
+// ② 直接粘贴奖品 JSON 文件的内容（单个对象或对象数组）：
+//
+//	{"value": "tippet_crooked_7j@icloud.com----https://host/..."}
+//
+// 解析不出邮箱或取码链接的条目会被跳过，跳过数由调用方报告，不静默吞掉。
 func ParseExternalMailboxLines(raw string) ([]ExternalMailboxInput, int) {
 	inputs := make([]ExternalMailboxInput, 0, 8)
 	skipped := 0
-	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, candidate := range externalCandidateLines(raw) {
+		// 空行不是「解析失败」，不该计进跳过数里。
+		if strings.TrimSpace(candidate) == "" {
 			continue
 		}
-		emailMatch := externalEmailPattern.FindStringSubmatch(line)
-		urlMatch := externalURLPattern.FindString(line)
-		if len(emailMatch) < 2 || urlMatch == "" {
+		email, endpoint, ok := splitExternalPair(candidate)
+		if !ok {
 			skipped++
 			continue
 		}
-		inputs = append(inputs, ExternalMailboxInput{
-			Email:      strings.ToLower(emailMatch[1]),
-			CodeAPIURL: strings.TrimSpace(urlMatch),
-		})
+		inputs = append(inputs, ExternalMailboxInput{Email: email, CodeAPIURL: endpoint})
 	}
 	return inputs, skipped
+}
+
+// externalCandidateLines 把输入摊平成「一条一行」的候选文本。
+//
+// 粘贴的是 JSON 就按 JSON 收集所有字符串值；否则按行切。
+// 这样两种入口共用同一套配对规则，而不是各写一个解析器。
+func externalCandidateLines(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		if values, ok := collectJSONStrings(trimmed); ok {
+			return values
+		}
+		// 不是合法 JSON 就退回按文本处理，不因为一个花括号把内容全丢掉。
+	}
+	return strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+}
+
+// collectJSONStrings 递归收集 JSON 文档里所有字符串值。
+// 不假设字段名叫 value —— 发奖平台换个字段名不该让导入失效。
+//
+// 用 Decoder 逐个读而不是 Unmarshal 一次：把几个奖品文件拼在一起是最常见的用法，
+// 而拼起来就不是单个合法 JSON 文档了（Unmarshal 会直接失败，整段报废）。
+func collectJSONStrings(raw string) ([]string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	values := make([]string, 0, 8)
+	parsed := 0
+	for {
+		var decoded any
+		err := decoder.Decode(&decoded)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			// 读到不合法的地方就停；已经读出来的文档仍然有效。
+			break
+		}
+		parsed++
+		collectStringsInto(&values, decoded)
+	}
+	if parsed == 0 {
+		return nil, false
+	}
+	return values, true
+}
+
+// collectStringsInto 递归收集一个 JSON 值里的所有字符串。
+func collectStringsInto(values *[]string, value any) {
+	switch typed := value.(type) {
+	case string:
+		*values = append(*values, typed)
+	case []any:
+		for _, item := range typed {
+			collectStringsInto(values, item)
+		}
+	case map[string]any:
+		// 键排序保证同一份输入每次产出同样的顺序。
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collectStringsInto(values, typed[key])
+		}
+	}
+}
+
+// splitExternalPair 从一段候选文本里取出「邮箱 + 取码地址」。
+func splitExternalPair(candidate string) (string, string, bool) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return "", "", false
+	}
+	// 显式切开「邮箱----取码地址」，不指望邮箱正则回溯出正确边界。
+	// 分隔符一旦出现，就按这个格式严格判：两侧必须各自完整，半条记录宁可丢掉也不猜。
+	if index := strings.Index(candidate, externalPairSeparator); index >= 0 {
+		email := strings.TrimSpace(candidate[:index])
+		endpoint := strings.TrimSpace(candidate[index+len(externalPairSeparator):])
+		if !externalEmailIsExact(email) || !externalURLIsExact(endpoint) {
+			return "", "", false
+		}
+		return strings.ToLower(email), endpoint, true
+	}
+	emailMatch := externalEmailPattern.FindStringSubmatch(candidate)
+	urlMatch := externalURLPattern.FindString(candidate)
+	if len(emailMatch) < 2 || urlMatch == "" {
+		return "", "", false
+	}
+	return strings.ToLower(emailMatch[1]), strings.TrimSpace(urlMatch), true
+}
+
+// externalEmailIsExact 要求整段就是邮箱本身，而不是「包含」一个邮箱。
+// 「{备注} a@icloud.com」这种左侧残留不能当成地址。
+func externalEmailIsExact(value string) bool {
+	match := externalEmailPattern.FindStringSubmatch(value)
+	return len(match) >= 2 && match[1] == value
+}
+
+// externalURLIsExact 同上：取码地址必须整段都是链接。
+func externalURLIsExact(value string) bool {
+	return value != "" && externalURLPattern.FindString(value) == value
 }
