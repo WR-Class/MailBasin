@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "latest": {
+    "version": "2.2.0",
+    "name": "MailBasin 2.2.0（多服务商版）",
+    "notes": "在 iCloud 之外加入 Microsoft Graph 与 Google Gmail 两条收发信通道，邮箱池改为按服务商区分。这是本仓库自己的版本线，与原项目 xiuxiu56/iCloud-Privacy-Mail-v2 的版本号不通用。",
+    "published_at": "2026-10-12T00:30:00+08:00",
+    "url": "https://github.com/WR-Class/MailBasin/archive/refs/heads/main.zip"
+  },
+  "announcements": [
+    {
+      "id": "mailbasin-2-2-0-multi-provider",
+      "type": "update",
+      "title": "2.2.0 多服务商版：Microsoft 与 Google 通道",
+      "summary": "同一套界面同时管理 iCloud、Microsoft 和 Google 三种邮箱来源。",
+      "content": "本仓库是原项目的多服务商分支。在保留 iCloud Hide My Email 全功能的基础上，新增 Microsoft Graph 与 Google Gmail 两条通道：账号授权、别名发现与导入、邮箱池统一管理、验证码提取与分发都已接通。三个服务商的创建能力不同，这是平台限制而非缺陷——iCloud 可以创建真实的隐私地址；Microsoft Graph 没有创建别名的接口，需要在 account.microsoft.com 手工创建后再导入；免费 Gmail 一个附加地址都创建不了，只能用 you+tag@gmail.com 这类变体。注意：本仓库的版本号自成一条线，不要与原项目的版本号互相比较，也不要用原项目的源码覆盖本仓库，否则会丢失 Microsoft 与 Google 支持。",
+      "published_at": "2026-10-12T00:30:00+08:00",
+      "url": "https://github.com/WR-Class/MailBasin/archive/refs/heads/main.zip"
+    },
+    {
+      "id": "source-version-2-1-2",
+      "type": "update",
+      "title": "2.1.2 Web API 渠道控制已更新",
+      "summary": "取码、手动同步、后台监听和远端邮件操作现在可以独立控制。",
+      "content": "系统设置新增四个 iCloud Web API 开关：取码与邮件刷新、手动邮件同步、后台邮件监听和远端邮件操作。取码与邮件刷新的 Web API 渠道默认关闭，其余渠道默认开启；关闭后对应场景仅使用 IMAP，本地已保存的邮件和验证码仍可读取。后台监听状态已压缩为紧凑格式，避免设置卡片高度变化。",
+      "published_at": "2026-08-29T22:30:00+08:00",
+      "url": "https://github.com/WR-Class/MailBasin/archive/refs/heads/main.zip"
+    },
+    {
+      "id": "source-version-2-1-1",
+      "type": "update",
+      "title": "2.1.1 邮件同步修复已更新",
+      "summary": "iCloud Web 全量请求、后台队列和同步进度提示已修复。",
+      "content": "全量 Web 补查现在使用 iCloud 网页端的 THREAD_ID_AND_DATE 模式和固定 1000 条窗口，不再把文件夹邮件数直接填入 maxResults。同步已有邮箱邮件改为后台任务，页面会先短暂显示启动说明，再持续更新完成、执行、排队、IMAP、Web API、扫描、匹配和新增数量。",
+      "published_at": "2026-08-29T02:00:00+08:00",
+      "url": "https://github.com/WR-Class/MailBasin/archive/refs/heads/main.zip"
+    },
+    {
+      "id": "source-version-2-1-0",
+      "type": "update",
+      "title": "2.1.0 源码版已更新",
+      "summary": "双路径读信、全量邮件同步、统一悬浮提示和系统维护能力已完善。",
+      "content": "同步已有邮箱邮件现在按 Apple 主号扫描全部邮件，IMAP 为主路径，iCloud Web 负责补查隐私邮箱归属，并按 Message-ID 合并去重。表格同步与详情同步共用同一账号级同步服务。全站控件悬浮说明统一使用自定义提示层，并自动避让窗口边缘。该项目只发布源代码，请重新下载 main 分支源码后按 README 构建。",
+      "published_at": "2026-08-29T00:00:00+08:00",
+      "url": "https://github.com/WR-Class/MailBasin/archive/refs/heads/main.zip"
+    },
+    {
+      "id": "version-and-announcement-center",
+      "type": "system",
+      "title": "版本检查与公告中心已启用",
+      "summary": "现在可以在系统设置中检查仓库新版本，并通过顶部铃铛查看公告。",
+      "content": "版本号显示在左侧导航底部。系统设置新增“版本与更新”区域，读取仓库公告配置中的 latest 判断版本，无需 API Token。顶部铃铛用于显示版本更新和项目公告。当前阶段只提供检查与查看，不会自动替换本地程序。",
+      "published_at": "2026-08-10T00:00:00+08:00"
+    }
+  ]
+}

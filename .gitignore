@@ -1,0 +1,9 @@
+.DS_Store
+bin/
+data/
+config.json
+frontend/dist/
+frontend/node_modules/
+.playwright-cli/
+*.log
+

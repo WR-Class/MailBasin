@@ -1,0 +1,473 @@
+<script setup>
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { AlertCircle, CheckCircle2, ClipboardCopy, Cloud, ExternalLink, Inbox, KeyRound, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { api } from '../api/client'
+import { useConfirm } from '../composables/useConfirm'
+import { subscribeRealtime } from '../composables/useRealtime'
+import { useToast } from '../composables/useToast'
+
+const loading = ref(true)
+const busyActions = ref([])
+const showLogin = ref(false)
+const showAddAlias = ref(false)
+const data = ref({ items: [], module: {}, module_ready: true })
+const selected = ref(null)
+const aliases = ref([])
+const login = reactive({ login_id: '', user_code: '', verification_uri: '', message: '', expires_at: '', status: 'idle' })
+const aliasForm = reactive({ email: '', label: '', note: '' })
+const { success, error: showError } = useToast()
+const { confirm: confirmAction } = useConfirm()
+let pollTimer
+let countdownTimer
+let realtimeRefreshTimer
+let realtimeUnsubscribe = () => {}
+const remainingSeconds = ref(0)
+
+const moduleReady = computed(() => data.value.module_ready !== false)
+const moduleInfo = computed(() => data.value.module || {})
+const polling = computed(() => login.status === 'pending' || login.status === 'slow_down')
+
+function flash(text, isError = false) {
+  if (isError) showError(text)
+  else success(text)
+}
+
+function isBusy(action) {
+  return busyActions.value.includes(action)
+}
+
+function startBusy(action) {
+  if (!action || isBusy(action)) return false
+  busyActions.value = [...busyActions.value, action]
+  return true
+}
+
+function finishBusy(action) {
+  if (!isBusy(action)) return
+  busyActions.value = busyActions.value.filter((item) => item !== action)
+}
+
+function statusLabel(value) {
+  return ({ active: '正常', need_login: '需要登录', need_consent: '需要授权', expired: '授权过期', rate_limited: '访问受限', failed: '失败' })[value] || value || '未知'
+}
+
+function statusClass(account) {
+  const status = account.icloud_status || account.status
+  if (status === 'active') return 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300'
+  if (status === 'need_login' || status === 'need_consent' || status === 'expired') return 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300'
+  return 'bg-rose-50 text-rose-600 dark:bg-rose-950/30 dark:text-rose-300'
+}
+
+function formatTime(value) {
+  if (!value || String(value).startsWith('0001-')) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function mailboxCount(account) {
+  return account.mailbox_count ?? 0
+}
+
+async function load(options = {}) {
+  const silent = Boolean(options.silent)
+  if (!silent) loading.value = true
+  try {
+    data.value = await api('/api/microsoft-accounts')
+    if (selected.value) {
+      const current = (data.value.items || []).find((item) => item.id === selected.value.id)
+      if (current) selected.value = { ...selected.value, ...current }
+      else {
+        selected.value = null
+        aliases.value = []
+      }
+    }
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    if (!silent) loading.value = false
+  }
+}
+
+function scheduleRealtimeRefresh(change) {
+  if (change.resource === 'microsoft-session') {
+    window.clearTimeout(realtimeRefreshTimer)
+    realtimeRefreshTimer = window.setTimeout(() => load({ silent: true }), 120)
+    return
+  }
+  if (change.resource === 'apple-account' && change.operation === 'updated' && change.payload?.data?.id) {
+    let applied = false
+    data.value.items = (data.value.items || []).map((item) => {
+      if (item.id !== change.payload.data.id) return item
+      applied = true
+      return { ...item, ...change.payload.data }
+    })
+    if (applied) return
+  }
+  window.clearTimeout(realtimeRefreshTimer)
+  realtimeRefreshTimer = window.setTimeout(() => load({ silent: true }), 120)
+}
+
+function stopPolling() {
+  window.clearInterval(pollTimer)
+  window.clearInterval(countdownTimer)
+  pollTimer = undefined
+  countdownTimer = undefined
+}
+
+function tickCountdown() {
+  if (!login.expires_at) {
+    remainingSeconds.value = 0
+    return
+  }
+  const deadline = new Date(login.expires_at).getTime()
+  remainingSeconds.value = Math.max(0, Math.round((deadline - Date.now()) / 1000))
+  if (remainingSeconds.value <= 0 && polling.value) {
+    login.status = 'expired'
+    stopPolling()
+  }
+}
+
+function openLoginDialog() {
+  login.login_id = ''
+  login.user_code = ''
+  login.verification_uri = ''
+  login.message = ''
+  login.expires_at = ''
+  login.status = 'idle'
+  remainingSeconds.value = 0
+  showLogin.value = true
+}
+
+function closeLoginDialog() {
+  stopPolling()
+  showLogin.value = false
+}
+
+async function startLogin() {
+  if (!startBusy('login-start')) return
+  try {
+    const result = await api('/api/microsoft-accounts/login/start', { method: 'POST' })
+    login.login_id = result.login_id
+    login.user_code = result.user_code
+    login.verification_uri = result.verification_uri
+    login.message = result.message || ''
+    login.expires_at = result.expires_at
+    login.status = 'pending'
+    tickCountdown()
+    const interval = Math.max(3, Number(result.interval_seconds) || 5) * 1000
+    stopPolling()
+    pollTimer = window.setInterval(pollLogin, interval)
+    countdownTimer = window.setInterval(tickCountdown, 1000)
+    flash('请在浏览器中打开验证地址并输入设备码')
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('login-start')
+  }
+}
+
+async function pollLogin() {
+  if (!login.login_id || isBusy('login-poll')) return
+  startBusy('login-poll')
+  try {
+    const result = await api('/api/microsoft-accounts/login/poll', {
+      method: 'POST',
+      body: JSON.stringify({ login_id: login.login_id }),
+    })
+    if (result.status === 'pending' || result.status === 'slow_down') {
+      login.status = result.status
+      return
+    }
+    if (result.status === 'completed') {
+      login.status = 'completed'
+      stopPolling()
+      const email = result.account?.apple_id || result.session?.email || ''
+      flash(`已添加 Microsoft 账号：${email}`)
+      closeLoginDialog()
+      await load()
+    }
+  } catch (err) {
+    stopPolling()
+    login.status = 'failed'
+    flash(err.message, true)
+  } finally {
+    finishBusy('login-poll')
+  }
+}
+
+async function copyUserCode() {
+  if (!login.user_code) return
+  try {
+    await navigator.clipboard.writeText(login.user_code)
+    flash('设备码已复制')
+  } catch {
+    flash('复制失败，请手动选择复制', true)
+  }
+}
+
+async function openVerificationPage() {
+  if (!login.verification_uri) return
+  window.open(login.verification_uri, '_blank', 'noopener')
+}
+
+async function selectAccount(account) {
+  const busyKey = `detail:${account.id}`
+  if (!startBusy(busyKey)) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${account.id}`)
+    selected.value = result.account
+    aliases.value = (result.mailboxes || []).map((item) => item.email)
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy(busyKey)
+  }
+}
+
+async function deleteAccount(account) {
+  const name = account.label || account.apple_id || account.id
+  const confirmed = await confirmAction({
+    title: '删除 Microsoft 账号',
+    message: `确定删除“${name}”吗？\n\n本地 OAuth2 授权、关联别名和本地邮件会一并删除；Microsoft 账号本身不受影响。`,
+    confirmText: '删除账号',
+    tone: 'danger',
+  })
+  if (!confirmed) return
+  const busyKey = `delete:${account.id}`
+  if (!startBusy(busyKey)) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${account.id}`, { method: 'DELETE' })
+    if (selected.value?.id === account.id) {
+      selected.value = null
+      aliases.value = []
+    }
+    await load()
+    const deleted = result.deleted || {}
+    flash(`已删除 Microsoft 账号：${name}；清理别名 ${deleted.mailboxes || 0} 个，邮件 ${deleted.messages || 0} 封`)
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy(busyKey)
+  }
+}
+
+async function checkAccount() {
+  if (!selected.value) return
+  if (!startBusy('check')) return
+  try {
+    await api(`/api/microsoft-accounts/${selected.value.id}/check`, { method: 'POST' })
+    flash('Microsoft 授权校验通过')
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('check')
+  }
+}
+
+async function discoverAliases() {
+  if (!selected.value) return
+  if (!startBusy('aliases')) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases`)
+    aliases.value = result.aliases || []
+    flash(result.count ? `发现 ${result.count} 个邮件地址` : '该账号未返回代理地址，请手工添加别名')
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('aliases')
+  }
+}
+
+async function importAliases() {
+  if (!selected.value) return
+  if (!startBusy('import')) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases/import`, { method: 'POST' })
+    aliases.value = result.aliases || []
+    flash(`别名导入完成：新增 ${result.created} 个，更新 ${result.updated} 个`)
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('import')
+  }
+}
+
+function openAddAliasDialog() {
+  if (!selected.value) {
+    flash('请先选择一个 Microsoft 账号', true)
+    return
+  }
+  aliasForm.email = ''
+  aliasForm.label = ''
+  aliasForm.note = ''
+  showAddAlias.value = true
+}
+
+async function addAlias() {
+  if (!selected.value) return
+  if (!startBusy('add-alias')) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}/mailboxes`, {
+      method: 'POST',
+      body: JSON.stringify(aliasForm),
+    })
+    showAddAlias.value = false
+    flash(`${result.created ? '已添加' : '已更新'}别名：${result.mailbox.email}`)
+    aliases.value = [...new Set([...aliases.value, result.mailbox.email])]
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('add-alias')
+  }
+}
+
+onMounted(() => {
+  load()
+  realtimeUnsubscribe = subscribeRealtime(['microsoft-session', 'apple-account', 'mailbox'], scheduleRealtimeRefresh)
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+  window.clearTimeout(realtimeRefreshTimer)
+  realtimeUnsubscribe()
+})
+</script>
+
+<template>
+  <div class="apple-account-page">
+    <section class="panel apple-account-workbench">
+      <header class="apple-command-bar">
+        <div class="apple-command-title"><span><Mail :size="16" /></span><div><h2>Microsoft 账号</h2><p>通过 Microsoft Graph 读取 Outlook 别名的验证码</p></div></div>
+        <div class="apple-command-actions">
+          <button class="primary-button apple-command-button" :disabled="!moduleReady" :title="moduleReady ? '使用设备码登录 Microsoft 账号' : 'Microsoft 模块已在配置中关闭'" @click="openLoginDialog"><Plus :size="14" />添加 Microsoft 账号</button>
+          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('aliases')" :title="selected ? '从 Graph 读取该账号的全部邮件地址' : '请先选择一个 Microsoft 账号'" @click="discoverAliases"><LoaderCircle v-if="isBusy('aliases')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />发现别名</button>
+          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '把发现的别名写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importAliases"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Inbox v-else :size="14" />导入别名</button>
+        </div>
+      </header>
+
+      <div v-if="moduleInfo.alias_limit_note" class="apple-module-note">
+        <AlertCircle :size="14" />
+        <span>{{ moduleInfo.alias_limit_note }}</span>
+      </div>
+
+      <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Microsoft 账号</div>
+      <div v-else class="apple-account-body">
+        <section class="apple-account-list">
+          <header class="apple-section-heading"><div><h3>账号与授权</h3><p>选择账号后可在右侧查看 OAuth2 授权与别名</p></div><span>{{ data.items?.length || 0 }} 个账号</span></header>
+          <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 Microsoft 账号</strong><small>点击“添加 Microsoft 账号”，在浏览器中完成设备码登录。</small></div>
+          <div v-else class="apple-account-table-viewport">
+            <table class="apple-account-table">
+              <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
+              <thead><tr><th>Microsoft 账号</th><th>状态</th><th>读信通道</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr v-for="account in data.items" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id || 'Microsoft 账号'} 的授权详情`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                  <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Mail v-else :size="14" /></span><span><strong>{{ account.label || account.apple_id || 'Microsoft 账号' }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
+                  <td><span :class="statusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
+                  <td><div class="apple-channel-list"><span class="apple-channel-pill"><Cloud :size="11" /><span>Microsoft Graph</span><em class="bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">官方 API</em></span></div></td>
+                  <td><button type="button" class="apple-delete-button" :title="`删除 ${account.label || account.apple_id || 'Microsoft 账号'}`" :aria-label="`删除 ${account.label || account.apple_id || 'Microsoft 账号'}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside class="apple-detail-panel">
+          <div v-if="!selected" class="apple-detail-empty"><span><Mail :size="20" /></span><strong>选择一个 Microsoft 账号</strong><small>OAuth2 授权状态与别名列表会显示在这里。</small></div>
+          <template v-else>
+            <header class="apple-detail-heading"><div><span>所选 Microsoft 账号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button></header>
+            <div class="ms-detail-scroll">
+            <div class="apple-state-list">
+              <article class="apple-state-row">
+                <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
+                <span class="apple-state-copy"><strong>OAuth2 授权</strong><small>访问令牌按需自动续期，refresh_token 加密存储</small></span>
+                <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
+              </article>
+              <article class="apple-state-row">
+                <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Cloud :size="14" /></span>
+                <span class="apple-state-copy"><strong>Microsoft Graph</strong><small>读取收件箱并按收件人分发到各个别名</small></span>
+                <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">已启用</span>
+              </article>
+            </div>
+
+            <div class="apple-detail-block">
+              <header class="apple-section-heading"><div><h3>别名邮箱</h3><p>Graph 不提供创建接口，请在 account.microsoft.com 手工创建后再导入</p></div><button class="secondary-button apple-check-button" @click="openAddAliasDialog"><Plus :size="13" />手工添加</button></header>
+              <div v-if="!aliases.length" class="apple-state-empty">还没有已导入的别名，点击“发现别名”或“手工添加”。</div>
+              <ul v-else class="apple-alias-list">
+                <li v-for="alias in aliases" :key="alias"><MailOpen :size="13" /><span class="font-mono">{{ alias }}</span></li>
+              </ul>
+            </div>
+
+            <div class="apple-detail-block">
+              <header class="apple-section-heading"><div><h3>授权信息</h3><p>客户端与租户来自系统设置或 config.json</p></div></header>
+              <dl class="apple-meta-list">
+                <div><dt>租户</dt><dd class="font-mono">{{ moduleInfo.tenant || 'common' }}</dd></div>
+                <div><dt>客户端 ID</dt><dd class="font-mono">{{ moduleInfo.client_id || '—' }}</dd></div>
+                <div><dt>别名上限</dt><dd>单账号 10 个（Microsoft 限制）</dd></div>
+                <div><dt>后台监听</dt><dd>{{ moduleInfo.watcher_enabled ? '已开启' : '已关闭' }}</dd></div>
+              </dl>
+              <p v-if="moduleInfo.using_default_client" class="apple-detail-hint"><AlertCircle :size="13" />当前使用内置公共客户端，建议在系统设置中填入自己的 Azure 应用 ID 以提高稳定性。</p>
+            </div>
+            </div>
+          </template>
+        </aside>
+      </div>
+    </section>
+
+    <div v-if="showLogin" class="mailbox-dialog-backdrop" role="presentation" @click.self="closeLoginDialog">
+      <section role="dialog" aria-modal="true" aria-labelledby="ms-login-title" class="panel mailbox-operation-dialog apple-login-dialog">
+        <header class="mailbox-dialog-heading"><div><h2 id="ms-login-title"><Mail :size="17" />添加 Microsoft 账号</h2><p>使用设备码登录，密码只在 Microsoft 官方页面输入，本地只保存 OAuth2 令牌。</p></div><button class="icon-button" title="关闭" @click="closeLoginDialog"><X :size="16" /></button></header>
+
+        <div v-if="!login.login_id" class="apple-dialog-fields">
+          <p class="apple-dialog-intro">点击下面的按钮获取一个设备码，然后按提示在浏览器中完成登录。</p>
+        </div>
+
+        <div v-else class="apple-dialog-fields">
+          <div class="ms-device-code">
+            <span class="form-label">设备码</span>
+            <div class="ms-device-code-row">
+              <code>{{ login.user_code }}</code>
+              <button type="button" class="secondary-button" @click="copyUserCode"><ClipboardCopy :size="13" />复制</button>
+            </div>
+          </div>
+          <div class="ms-device-steps">
+            <div><span>1</span><p>打开 <button type="button" class="link-button" @click="openVerificationPage">{{ login.verification_uri }}<ExternalLink :size="12" /></button></p></div>
+            <div><span>2</span><p>输入上面的设备码并登录你要接入的 Microsoft 账号</p></div>
+            <div><span>3</span><p>同意读取邮件的授权，页面会自动完成接入</p></div>
+          </div>
+          <p v-if="login.message" class="apple-dialog-intro">{{ login.message }}</p>
+          <div class="ms-poll-status" :class="`ms-poll-${login.status}`">
+            <LoaderCircle v-if="polling" :size="14" class="animate-spin" />
+            <CheckCircle2 v-else-if="login.status === 'completed'" :size="14" />
+            <AlertCircle v-else :size="14" />
+            <span v-if="polling">等待浏览器中完成登录…<template v-if="remainingSeconds > 0">（剩余 {{ remainingSeconds }} 秒）</template></span>
+            <span v-else-if="login.status === 'completed'">登录已完成</span>
+            <span v-else-if="login.status === 'expired'">设备码已过期，请重新发起</span>
+            <span v-else-if="login.status === 'failed'">登录失败，请查看提示后重试</span>
+            <span v-else>准备就绪</span>
+          </div>
+        </div>
+
+        <footer class="mailbox-dialog-actions">
+          <button type="button" class="secondary-button" @click="closeLoginDialog">关闭</button>
+          <button v-if="!login.login_id" class="primary-button" :disabled="isBusy('login-start')" @click="startLogin"><LoaderCircle v-if="isBusy('login-start')" :size="14" class="animate-spin" /><ShieldCheck v-else :size="14" />获取设备码</button>
+          <button v-else class="primary-button" :disabled="!polling || isBusy('login-poll')" @click="pollLogin"><LoaderCircle v-if="isBusy('login-poll')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />立即检查</button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="showAddAlias" class="mailbox-dialog-backdrop" role="presentation" @click.self="showAddAlias = false">
+      <form role="dialog" aria-modal="true" aria-labelledby="ms-alias-title" class="panel mailbox-operation-dialog apple-form-dialog" @submit.prevent="addAlias">
+        <header class="mailbox-dialog-heading"><div><h2 id="ms-alias-title"><Plus :size="17" />手工添加别名</h2><p>当前账号：{{ selected?.label || selected?.apple_id }}</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('add-alias')" @click="showAddAlias = false"><X :size="16" /></button></header>
+        <div class="apple-dialog-fields">
+          <label class="form-group"><span class="form-label">别名邮箱地址</span><input v-model.trim="aliasForm.email" class="field font-mono" type="email" placeholder="alias@outlook.com" required /><span class="form-help">必须是该 Microsoft 账号上已经存在的别名。</span></label>
+          <div class="apple-create-meta"><label class="form-group"><span class="form-label">标签</span><input v-model.trim="aliasForm.label" class="field" placeholder="可选" /></label><label class="form-group"><span class="form-label">备注</span><input v-model.trim="aliasForm.note" class="field" placeholder="可选备注" /></label></div>
+        </div>
+        <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('add-alias')" @click="showAddAlias = false">取消</button><button class="primary-button" :disabled="isBusy('add-alias')"><LoaderCircle v-if="isBusy('add-alias')" :size="14" class="animate-spin" /><Plus v-else :size="14" />添加别名</button></footer>
+      </form>
+    </div>
+  </div>
+</template>
