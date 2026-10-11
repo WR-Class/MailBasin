@@ -37,9 +37,10 @@ const (
 	// 超过这个长度 Gmail 会直接拒收，但地址本身照样能存进库、也能在列表里显示——
 	// 变成一个看起来正常、却永远收不到信的地址。所以必须在构造时就拦住。
 	MaxPlusAliasLocalPart = 64
-	// plusTagAlphabet 去掉了 i、l、o、0、1：这几个在抄写和朗读地址时最容易混淆。
-	plusTagAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"
-	// DefaultPlusTagLength 是随机标签的默认长度，31^8 ≈ 8.5×10^11，碰撞可以忽略。
+	// plusTagAlphabet 是小写字母加数字的完整 36 字符集。地址都是复制粘贴用的，
+	// 不需要为了好念而牺牲字符空间——去掉 i/l/o/0/1 会让碰撞概率涨到三倍多。
+	plusTagAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	// DefaultPlusTagLength 是随机标签的默认长度，36^8 ≈ 2.8×10^12，碰撞可以忽略。
 	DefaultPlusTagLength = 8
 )
 

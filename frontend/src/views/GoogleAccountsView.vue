@@ -27,8 +27,9 @@ const tagForm = reactive({ tag: '', label: '', note: '' })
 const showBatch = ref(false)
 const batchForm = reactive({ prefix: '', count: 100, label: '', note: '' })
 const BATCH_MAX = 1000
-// 和后端同一套字符集：去掉 i、l、o、0、1 这些抄写时容易看错的字符。
-const PLUS_TAG_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'
+// 「随机」按钮用的字符集，和后端保持一致。真正的随机后缀是服务端生成的，
+// 这里只决定前缀建议长什么样，所以两边不同步也不影响地址的正确性。
+const PLUS_TAG_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
 
 // 给前缀填一个随机值，让使用者不必自己想。
 function randomPrefix() {

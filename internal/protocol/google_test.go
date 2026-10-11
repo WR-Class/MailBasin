@@ -440,15 +440,20 @@ func TestBuildPlusAliasEnforcesLocalPartLimit(t *testing.T) {
 	}
 }
 
-// 随机标签用的字符集不能含 i、l、o、0、1：这几个在抄写地址时最容易看错。
-func TestPlusTagAlphabetExcludesConfusableCharacters(t *testing.T) {
-	for _, bad := range []string{"i", "l", "o", "0", "1"} {
-		if strings.Contains(plusTagAlphabet, bad) {
-			t.Fatalf("字符集不应包含易混淆字符 %q：%s", bad, plusTagAlphabet)
+// 字符集必须是完整的 36 个小写字母数字：地址都是复制粘贴用的，不需要为可念性牺牲空间。
+func TestPlusTagAlphabetIsFullLowercaseAlphanumeric(t *testing.T) {
+	seen := map[rune]bool{}
+	for _, char := range plusTagAlphabet {
+		if !(char >= 'a' && char <= 'z') && !(char >= '0' && char <= '9') {
+			t.Fatalf("字符 %q 不是小写字母或数字，放进邮箱地址不安全", char)
 		}
+		if seen[char] {
+			t.Fatalf("字符集出现重复字符 %q，会让分布不均并白白缩小空间", char)
+		}
+		seen[char] = true
 	}
-	if len(plusTagAlphabet) < 30 {
-		t.Fatalf("字符集太小，碰撞概率会明显上升：%d 个字符", len(plusTagAlphabet))
+	if len(seen) != 36 {
+		t.Fatalf("字符集应为 36 个小写字母数字，实际 %d 个", len(seen))
 	}
 }
 
