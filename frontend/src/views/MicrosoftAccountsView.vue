@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { AlertCircle, CheckCircle2, ClipboardCopy, Cloud, ExternalLink, Inbox, KeyRound, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, ClipboardCopy, Cloud, ExternalLink, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -15,6 +15,27 @@ const selected = ref(null)
 const aliases = ref([])
 const login = reactive({ login_id: '', user_code: '', verification_uri: '', message: '', expires_at: '', status: 'idle' })
 const aliasForm = reactive({ email: '', label: '', note: '' })
+
+// 批量生成用独立的表单：前缀留空即纯随机，数量决定一次建多少个。
+// 免费 Outlook.com 同样支持 + 标签寻址（实测确认），做法与谷歌一致。
+const showBatch = ref(false)
+const batchForm = reactive({ prefix: '', count: 100, label: '', note: '' })
+const BATCH_MAX = 1000
+// 「随机」按钮用的字符集，和后端保持一致。真正的随机后缀由服务端生成，
+// 这里只决定前缀建议长什么样，所以两边不同步也不影响地址的正确性。
+const PLUS_TAG_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+function randomPrefix() {
+  const values = new Uint32Array(6)
+  crypto.getRandomValues(values)
+  return [...values].map((value) => PLUS_TAG_ALPHABET[value % PLUS_TAG_ALPHABET.length]).join('')
+}
+
+const batchPreview = computed(() => {
+  const base = (selected.value?.email || 'you@outlook.com').split('@')[0].split('+')[0]
+  const prefix = (batchForm.prefix || '').trim().toLowerCase()
+  return `${base}+${prefix ? `${prefix}-xxxxxxxx` : 'xxxxxxxx'}@outlook.com`
+})
 const { success, error: showError } = useToast()
 const { confirm: confirmAction } = useConfirm()
 let pollTimer
@@ -323,6 +344,53 @@ function openAddAliasDialog() {
   showAddAlias.value = true
 }
 
+function openBatchDialog() {
+  if (!selected.value) {
+    flash('请先选择一个 Microsoft 账号', true)
+    return
+  }
+  batchForm.prefix = ''
+  batchForm.count = 100
+  batchForm.label = ''
+  batchForm.note = ''
+  showBatch.value = true
+}
+
+// 批量生成 + 标签地址。服务端会比对邮箱池里已有的全部地址，
+// 所以这次建的 100 个和下次建的 1000 个不会重复。
+async function generateAliases() {
+  if (!selected.value) return
+  const count = Number(batchForm.count)
+  if (!Number.isFinite(count) || count < 1) {
+    flash('创建数量必须是大于 0 的整数', true)
+    return
+  }
+  if (count > BATCH_MAX) {
+    flash(`单次最多生成 ${BATCH_MAX} 个地址`, true)
+    return
+  }
+  if (!startBusy('generate-batch')) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases/generate-batch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        prefix: batchForm.prefix.trim(),
+        count,
+        label: batchForm.label.trim(),
+        note: batchForm.note.trim(),
+      }),
+    })
+    const skipped = result.skipped ? `，未能生成 ${result.skipped} 个` : ''
+    flash(`已生成 ${result.created} 个 Outlook + 地址${skipped}`)
+    showBatch.value = false
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('generate-batch')
+  }
+}
+
 async function addAlias() {
   if (!selected.value) return
   if (!startBusy('add-alias')) return
@@ -364,6 +432,7 @@ onBeforeUnmount(() => {
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('aliases')" :title="selected ? '从 Graph 读取该账号的全部邮件地址' : '请先选择一个 Microsoft 账号'" @click="discoverAliases"><LoaderCircle v-if="isBusy('aliases')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />发现别名</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '只把该账号的主邮箱地址写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importPrimary"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Mail v-else :size="14" />导入主地址</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '把发现的别名写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importAliases"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Inbox v-else :size="14" />导入别名</button>
+          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('generate-batch')" :title="selected ? '随机批量生成 Outlook + 标签地址，跨批次不会重复' : '请先选择一个 Microsoft 账号'" @click="openBatchDialog"><LoaderCircle v-if="isBusy('generate-batch')" :size="14" class="animate-spin" /><Layers v-else :size="14" />批量生成</button>
         </div>
       </header>
 
@@ -485,6 +554,18 @@ onBeforeUnmount(() => {
           <div class="apple-create-meta"><label class="form-group"><span class="form-label">标签</span><input v-model.trim="aliasForm.label" class="field" placeholder="可选" /></label><label class="form-group"><span class="form-label">备注</span><input v-model.trim="aliasForm.note" class="field" placeholder="可选备注" /></label></div>
         </div>
         <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('add-alias')" @click="showAddAlias = false">取消</button><button class="primary-button" :disabled="isBusy('add-alias')"><LoaderCircle v-if="isBusy('add-alias')" :size="14" class="animate-spin" /><Plus v-else :size="14" />添加别名</button></footer>
+      </form>
+    </div>
+    <div v-if="showBatch" class="mailbox-dialog-backdrop" role="presentation" @click.self="showBatch = false">
+      <form role="dialog" aria-modal="true" aria-labelledby="ms-batch-title" class="panel mailbox-operation-dialog apple-form-dialog" @submit.prevent="generateAliases">
+        <header class="mailbox-dialog-heading"><div><h2 id="ms-batch-title"><Layers :size="17" />批量生成 + 地址</h2><p>当前账号：{{ selected?.label || selected?.apple_id }}</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('generate-batch')" @click="showBatch = false"><X :size="16" /></button></header>
+        <div class="apple-dialog-fields">
+          <label class="form-group"><span class="form-label">标签前缀（可选）</span><span class="apple-inline-field"><input v-model.trim="batchForm.prefix" class="field font-mono" placeholder="留空则纯随机" /><button type="button" class="secondary-button" :disabled="isBusy('generate-batch')" @click="batchForm.prefix = randomPrefix()">随机</button></span><span class="form-help">填 shop 会生成形如 {{ batchPreview }} 的地址。</span></label>
+          <label class="form-group"><span class="form-label">创建数量</span><input v-model.number="batchForm.count" class="field" type="number" min="1" :max="BATCH_MAX" required /><span class="form-help">单次最多 {{ BATCH_MAX }} 个。</span></label>
+          <div class="apple-create-meta"><label class="form-group"><span class="form-label">标签</span><input v-model.trim="batchForm.label" class="field" placeholder="留空则用地址本身" /></label><label class="form-group"><span class="form-label">备注</span><input v-model.trim="batchForm.note" class="field" placeholder="可选备注" /></label></div>
+          <p class="apple-dialog-intro">随机后缀由服务端生成，生成前会和邮箱池里已有的全部地址比对，<strong>所以下次再建多少都不会和这次的重复</strong>。免费 Outlook.com 支持 + 标签寻址：邮件投递到主地址的同一个收件箱，收件人字段会保留标签（已实测确认）。地址必须先在这里建好才能收到信——路由是按收件人精确匹配的。</p>
+        </div>
+        <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('generate-batch')" @click="showBatch = false">取消</button><button class="primary-button" :disabled="isBusy('generate-batch')"><LoaderCircle v-if="isBusy('generate-batch')" :size="14" class="animate-spin" /><Layers v-else :size="14" />生成 {{ batchForm.count || 0 }} 个地址</button></footer>
       </form>
     </div>
   </div>

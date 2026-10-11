@@ -289,6 +289,27 @@ func (s *Server) handleMicrosoftPrimaryImport(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
 }
 
+// handleMicrosoftAliasBatch 批量生成 Outlook + 标签地址。prefix 留空即纯随机；跨批次不会重复。
+func (s *Server) handleMicrosoftAliasBatch(w http.ResponseWriter, r *http.Request) {
+	accountID := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Prefix string `json:"prefix"`
+		Count  int    `json:"count"`
+		Label  string `json:"label"`
+		Note   string `json:"note"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := s.mailbox.CreateMicrosoftAliases(accountID, body.Prefix, body.Count, body.Label, body.Note)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
+}
+
 // handleMicrosoftMailboxCreate 手工添加单个别名地址。
 func (s *Server) handleMicrosoftMailboxCreate(w http.ResponseWriter, r *http.Request) {
 	accountID := strings.TrimSpace(r.PathValue("id"))

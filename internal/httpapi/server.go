@@ -147,6 +147,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/microsoft-accounts/{id}/aliases", s.protected(s.handleMicrosoftAliases))
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/aliases/import", s.protected(s.handleMicrosoftAliasImport))
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/aliases/import-primary", s.protected(s.handleMicrosoftPrimaryImport))
+	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/aliases/generate-batch", s.protected(s.handleMicrosoftAliasBatch))
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/mailboxes", s.protected(s.handleMicrosoftMailboxCreate))
 	s.mux.HandleFunc("GET /api/google/status", s.protected(s.handleGoogleStatus))
 	s.mux.HandleFunc("PUT /api/google/settings", s.protected(s.handleGoogleSettings))

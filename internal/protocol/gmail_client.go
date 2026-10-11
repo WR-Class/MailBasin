@@ -349,35 +349,52 @@ func (c *GmailClient) ListAliases(ctx context.Context, accessToken string) ([]st
 // 投递到同一个收件箱，而且 To / Delivered-To 头会原样保留 +shop。
 // 局限也要说清楚：+ 标签暴露真实地址，且部分网站会拒绝或截断 + 之后的字符。
 func BuildPlusAlias(email, tag string) (string, error) {
+	return buildPlusAlias(email, tag, "google_alias", "Gmail")
+}
+
+// BuildMicrosoftPlusAlias 把 + 标签拼到 Microsoft 主地址上。
+//
+// 免费 Outlook.com 同样支持 plus addressing，这一点是实测确认的：一封发到
+// qiaobaochong823680+tag@outlook.com 的邮件确实投递到了该账号，而且 Graph 的
+// toRecipients 原样保留了标签（没有被归一化成主地址）。所以分发逻辑与 Gmail 完全一致，
+// 唯一的前提是那个 + 地址必须已经在邮箱池里——路由是精确匹配收件人的。
+func BuildMicrosoftPlusAlias(email, tag string) (string, error) {
+	return buildPlusAlias(email, tag, "microsoft_alias", "Microsoft")
+}
+
+// buildPlusAlias 是 Gmail 与 Outlook.com 共用的 + 标签拼接逻辑：两家的语义一致，
+// 都是「主地址 + 任意标签投递到同一个收件箱，且标签保留在收件人头里」。
+// codePrefix 让两家的错误码保持可区分，便于前端和日志定位到具体服务商。
+func buildPlusAlias(email, tag, codePrefix, providerLabel string) (string, error) {
 	email = normalizeMailAddress(email)
 	tag = strings.TrimSpace(tag)
 	if email == "" {
-		return "", errCode("google_alias_email_missing", "缺少 Gmail 主地址", false)
+		return "", errCode(codePrefix+"_email_missing", "缺少 "+providerLabel+" 主地址", false)
 	}
 	if tag == "" {
-		return "", errCode("google_alias_tag_missing", "请填写 + 标签，例如 shop", false)
+		return "", errCode(codePrefix+"_tag_missing", "请填写 + 标签，例如 shop", false)
 	}
-	// + 本身不能进标签：you+a+b@gmail.com 里 Gmail 会把整段 a+b 当成标签，
+	// + 本身不能进标签：you+a+b@gmail.com 里整段 a+b 会被当成一个标签，
 	// 但人看着像是两个标签，而且与"替换已有 + 标签"的语义冲突。
 	if strings.Contains(tag, "@") || strings.Contains(tag, "+") || strings.ContainsAny(tag, " \t\r\n") {
-		return "", errCode("google_alias_tag_invalid", "+ 标签不能包含 @、+ 或空白字符", false)
+		return "", errCode(codePrefix+"_tag_invalid", "+ 标签不能包含 @、+ 或空白字符", false)
 	}
-	// Gmail 不区分大小写，+Shop 与 +shop 是同一个收件箱。
+	// 两家都不区分大小写，+Shop 与 +shop 是同一个收件箱。
 	// 统一转小写，避免同一个地址在库里存成两条。
 	tag = strings.ToLower(tag)
 	at := strings.LastIndex(email, "@")
 	if at <= 0 {
-		return "", errCode("google_alias_email_invalid", "Gmail 主地址格式不正确", false)
+		return "", errCode(codePrefix+"_email_invalid", providerLabel+" 主地址格式不正确", false)
 	}
 	local, domain := email[:at], email[at+1:]
 	// 主地址本身已经带 + 时，替换而不是叠加，避免 you+a+b@gmail.com 这种歧义地址。
 	if plus := strings.Index(local, "+"); plus >= 0 {
 		local = local[:plus]
 	}
-	// RFC 5321 的长度上限：超了 Gmail 会静默拒收，而地址在库里一切正常，
+	// RFC 5321 的长度上限：超了对方会静默拒收，而地址在库里一切正常，
 	// 所以这里必须报错，不能让使用者拿到一个永远收不到信的地址。
 	if length := len(local) + 1 + len(tag); length > MaxPlusAliasLocalPart {
-		return "", errCode("google_alias_too_long", fmt.Sprintf(
+		return "", errCode(codePrefix+"_too_long", fmt.Sprintf(
 			"地址过长：@ 之前最多 %d 个字符，「%s+%s」是 %d 个，请缩短 + 标签（此主地址最多可容纳 %d 个字符的标签）",
 			MaxPlusAliasLocalPart, local, tag, length, MaxPlusAliasLocalPart-len(local)-1), false)
 	}
