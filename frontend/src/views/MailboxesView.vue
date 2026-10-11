@@ -31,6 +31,9 @@ const rowBusyActions = ref({})
 const selectedMailboxes = ref([])
 const accounts = ref([])
 const showImport = ref(false)
+// 外部取码邮箱：没有母号、没有登录密码，只有一个取码地址。
+const showExternalImport = ref(false)
+const externalImport = reactive({ raw: '', label: '', note: '' })
 const showSync = ref(false)
 const showBulkDelete = ref(false)
 const bulkDeleteEmails = ref('')
@@ -569,6 +572,60 @@ function openImportDialog() {
   showBulkDelete.value = false
   if (!mailboxImport.account_id && accounts.value.length) mailboxImport.account_id = accounts.value[0].id
   showImport.value = true
+}
+
+function openExternalImportDialog() {
+  showImport.value = false
+  showSync.value = false
+  showBulkDelete.value = false
+  externalImport.raw = ''
+  externalImport.label = ''
+  externalImport.note = ''
+  showExternalImport.value = true
+}
+
+// 从粘贴内容里预览能解析出几条。服务端会再解析一次，这里只为让人提交前看清。
+const externalPreviewCount = computed(() => {
+  const seen = new Set()
+  return String(externalImport.raw || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      const email = (line.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [])[0]
+      const url = /https?:\/\/\S+/.test(line)
+      if (!email || !url || seen.has(email.toLowerCase())) return false
+      seen.add(email.toLowerCase())
+      return true
+    }).length
+})
+
+// 导入只有取件接口的裸邮箱。没有母号也没有密码，唯一的凭据是取码地址里的令牌。
+async function importExternalMailboxes() {
+  if (!externalImport.raw.trim()) {
+    flash('请粘贴至少一行「邮箱地址 + 取码地址」', true)
+    return
+  }
+  if (!startBusy('external-import')) return
+  try {
+    const payload = await api('/api/mailboxes/import-external', {
+      method: 'POST',
+      body: JSON.stringify({
+        raw: externalImport.raw,
+        label: externalImport.label.trim(),
+        note: externalImport.note.trim(),
+      }),
+    })
+    const result = payload.result || {}
+    const parts = [`新增 ${result.created || 0} 个`, `更新 ${result.updated || 0} 个`]
+    if (result.failed) parts.push(`失败 ${result.failed} 个`)
+    if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 行`)
+    flash(`外部邮箱导入完成：${parts.join('，')}`, Boolean(result.failed))
+    if (!result.failed) showExternalImport.value = false
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('external-import')
+  }
 }
 
 function parseBulkDeleteEmails(value) {
@@ -1434,6 +1491,7 @@ onBeforeUnmount(() => {
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing') || isBusy('sync-existing-messages') || existingMailboxMessageSync.running" @click="openSyncDialog"><LoaderCircle v-if="isBusy('sync-existing')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('sync-existing') ? '正在同步邮箱' : '同步已有邮箱' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing-messages') || isBusy('sync-existing') || existingMailboxMessageSync.running" title="读取所有 Apple 主号的全部邮件；IMAP 主路径，iCloud Web 补查并自动合并" @click="syncExistingMailboxMessages"><LoaderCircle v-if="isBusy('sync-existing-messages') || existingMailboxMessageSync.running" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />{{ existingMailboxMessageSync.running ? `正在同步 ${existingMailboxMessageSync.completed_accounts || 0}/${existingMailboxMessageSync.total_accounts || 0}` : isBusy('sync-existing-messages') ? '正在启动同步' : '同步已有邮箱邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('import')" @click="openImportDialog"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><MailPlus v-else :size="14" />{{ isBusy('import') ? '正在导入邮箱' : '导入本地邮箱' }}</button>
+          <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('external-import')" title="导入没有母号、没有密码，只有取件接口的邮箱" @click="openExternalImportDialog"><LoaderCircle v-if="isBusy('external-import')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />导入外部取码邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" title="扫描并彻底删除全部 Apple 账号的云端和本地邮件" @click="cleanAllAppleMail"><LoaderCircle v-if="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />{{ isBusy('clean-summary') ? '正在统计邮件' : isBusy('clean-start') ? '正在启动清理' : appleMailCleanup.running ? `正在清理 ${appleMailCleanup.completed || 0}/${appleMailCleanup.total_accounts || 0}` : '全部彻底清理 Apple 邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="isBusy('bulk-delete-resolve')" title="按邮箱地址批量彻底删除 Apple 云端和本地邮箱" @click="openBulkDeleteDialog"><Trash2 :size="14" />批量删除指定邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="!selectedDeletableCount || deleteConfirmID === 'selected'" :title="selectedDeletableCount ? `彻底删除选中的 ${selectedDeletableCount} 个邮箱` : '请先选择未进入删除队列的邮箱'" @click="removeSelectedMailboxes"><LoaderCircle v-if="deleteConfirmID === 'selected'" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />删除选中{{ selectedDeletableCount ? `（${selectedDeletableCount}）` : '' }}</button>
@@ -1481,6 +1539,19 @@ onBeforeUnmount(() => {
             <label class="form-group"><span class="form-label">备注</span><input v-model.trim="mailboxImport.note" class="field" placeholder="可选" /></label>
           </div>
           <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('import')" @click="showImport = false">取消</button><button class="primary-button" :disabled="isBusy('import')"><LoaderCircle v-if="isBusy('import')" :size="15" class="animate-spin" /><MailPlus v-else :size="15" />保存本地邮箱</button></footer>
+        </form>
+      </div>
+
+      <div v-if="showExternalImport" class="mailbox-dialog-backdrop" role="presentation" @click.self="showExternalImport = false">
+        <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="external-import-title" @submit.prevent="importExternalMailboxes">
+          <header class="mailbox-dialog-heading"><div><h2 id="external-import-title"><CloudDownload :size="18" />导入外部取码邮箱</h2><p>适用于没有母号、也没有登录密码，只有一个取件接口的邮箱。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('external-import')" @click="showExternalImport = false"><X :size="16" /></button></header>
+          <div class="mailbox-dialog-grid">
+            <label class="form-group mailbox-dialog-wide"><span class="form-label">粘贴邮箱和取码地址</span><textarea v-model="externalImport.raw" class="field font-mono" rows="7" placeholder="tippet_crooked_7j@icloud.com https://ic-mail.example.com/api/v1/access/TOKEN/mailboxes/tippet_crooked_7j@icloud.com/code" required></textarea><span class="form-help">每行一条，邮箱地址和取码链接顺序随意，Markdown 表格也能直接粘。已解析出 <strong>{{ externalPreviewCount }}</strong> 条。取码地址里含访问令牌，保存时会加密。</span></label>
+            <label class="form-group"><span class="form-label">标签</span><input v-model.trim="externalImport.label" class="field" placeholder="留空则用邮箱地址" /></label>
+            <label class="form-group"><span class="form-label">备注</span><input v-model.trim="externalImport.note" class="field" placeholder="可选" /></label>
+          </div>
+          <p class="apple-dialog-intro">这类邮箱取信靠的是那个接口令牌，不是 Apple 登录态：导入时会先探活一次并如实报告结果，令牌失效会直接说明，不会伪装成「还没收到验证码」。导入后在邮箱池里点「同步」即可取码。</p>
+          <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('external-import')" @click="showExternalImport = false">取消</button><button class="primary-button" :disabled="isBusy('external-import')"><LoaderCircle v-if="isBusy('external-import')" :size="15" class="animate-spin" /><CloudDownload v-else :size="15" />导入 {{ externalPreviewCount }} 个邮箱</button></footer>
         </form>
       </div>
 

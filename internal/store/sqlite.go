@@ -469,6 +469,8 @@ func (s *Store) transformSecrets(table string, value any, encrypt bool) error {
 		keys["password"] = true
 	case "mailboxes":
 		keys["api_token"] = true
+		// 外部取码地址内嵌访问令牌，和 api_token 同级保密。
+		keys["code_api_url"] = true
 	case "settings":
 		keys["public_api_key"] = true
 		keys["server_chan_send_key"] = true
@@ -643,7 +645,7 @@ func redactSecrets(value any) {
 		for key, child := range typed {
 			switch key {
 			case "api_token", "public_api_key", "server_chan_send_key", "password", "password_hash", "value", "api_key", "data_access_token", "imap_app_password",
-				"access_token", "refresh_token", "id_token", "client_secret":
+				"access_token", "refresh_token", "id_token", "client_secret", "code_api_url":
 				delete(typed, key)
 			default:
 				redactSecrets(child)

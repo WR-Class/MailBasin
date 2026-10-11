@@ -167,6 +167,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/mailboxes", s.protected(s.handleMailboxes))
 	s.mux.HandleFunc("POST /api/mailboxes", s.protected(s.handleImportMailbox))
 	s.mux.HandleFunc("POST /api/mailboxes/resolve", s.protected(s.handleMailboxResolve))
+	s.mux.HandleFunc("POST /api/mailboxes/import-external", s.protected(s.handleImportExternalMailboxes))
 	s.mux.HandleFunc("GET /api/mailboxes/sync-messages/status", s.protected(s.handleExistingMailboxMessagesSyncStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/sync-messages", s.protected(s.handleExistingMailboxMessagesSync))
 	s.mux.HandleFunc("POST /api/mailboxes/remote-clean", s.protected(s.handleMailboxesRemoteClean))
@@ -846,6 +847,38 @@ func (s *Server) handleImportMailbox(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, map[string]any{"success": true, "data": map[string]any{"mailbox": mailbox, "created": created}})
+}
+
+// handleImportExternalMailboxes 导入只有取码接口的裸邮箱：没有母号，也没有登录密码，
+// 唯一的凭据就是取码地址里的令牌。既接受结构化数组，也接受直接粘贴的多行文本。
+func (s *Server) handleImportExternalMailboxes(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Items []mailboxservice.ExternalMailboxInput `json:"items"`
+		Raw   string                                `json:"raw"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	items := body.Items
+	skipped := 0
+	if strings.TrimSpace(body.Raw) != "" {
+		parsed, dropped := mailboxservice.ParseExternalMailboxLines(body.Raw)
+		items = append(items, parsed...)
+		skipped += dropped
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusBadRequest, "no_items", "没有解析出任何「邮箱地址 + 取码地址」，请检查粘贴内容")
+		return
+	}
+	result, err := s.mailbox.ImportExternalMailboxes(items)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+		"result": result, "skipped_lines": skipped,
+	}})
 }
 
 func (s *Server) handleMailboxRemoteClean(w http.ResponseWriter, r *http.Request) {

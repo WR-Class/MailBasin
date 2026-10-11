@@ -875,6 +875,10 @@ func (s *Service) appleMailCleanupSnapshotLocked() AppleMailCleanupJob {
 }
 
 func (s *Service) SyncMessages(ctx context.Context, mailboxID string) (int, error) {
+	// 外部取码邮箱没有母号，走不了下面那条按账号分组的路径，单独分流。
+	if mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID)); ok && mailbox.ProviderOrDefault() == domain.ProviderExternal {
+		return s.SyncExternalMailbox(ctx, mailbox.ID)
+	}
 	allowWebAPI := s.store.Settings().EnableWebCodeSync
 	result, err := s.syncMailboxMessagesWithOptions(ctx, mailboxID, MessageSyncOptions{
 		Mode: protocol.MailSyncModeVerification, Trigger: "verification", Limit: s.cfg.MailWatcherFetchLimit,

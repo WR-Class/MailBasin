@@ -95,6 +95,50 @@ func TestSQLiteDoesNotImportLegacyStateJSON(t *testing.T) {
 	}
 }
 
+func TestSQLiteEncryptsExternalCodeAPIURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.db")
+	state, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	// 取码地址里内嵌访问令牌，它和 api_token 同级保密：落库必须是密文。
+	const endpoint = "https://host/api/v1/access/SUPERSECRETTOKEN/mailboxes/bare@icloud.com/code"
+	mailbox, _, err := state.UpsertMailboxFromRemote("", domain.RemoteMailbox{
+		Provider: domain.ProviderExternal, Email: "bare@icloud.com", IsActive: true,
+		Origin: "external_code_api", CodeAPIURL: endpoint,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := state.db.QueryRow(`SELECT data_json FROM mailboxes WHERE id = ?`, mailbox.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("SUPERSECRETTOKEN")) {
+		t.Fatalf("取码地址里的令牌未加密：%s", raw)
+	}
+	if !bytes.Contains(raw, []byte(secretPrefix)) {
+		t.Fatalf("取码地址应带加密前缀：%s", raw)
+	}
+	// 重新打开后必须能拿回明文，否则功能本身是坏的。
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	restored, ok := reopened.FindMailboxByEmail("bare@icloud.com")
+	if !ok {
+		t.Fatal("重开后找不到该邮箱")
+	}
+	if restored.CodeAPIURL != endpoint {
+		t.Fatalf("重开后取码地址不正确：%q", restored.CodeAPIURL)
+	}
+	if restored.ProviderOrDefault() != domain.ProviderExternal {
+		t.Fatalf("重开后服务商被改掉了：%q", restored.ProviderOrDefault())
+	}
+}
+
 func TestSQLiteEncryptsSensitiveFieldsAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.db")
 	state, err := Open(path)

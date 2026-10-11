@@ -110,6 +110,10 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 			mailbox.Provider = domain.NormalizeProvider(remote.Provider)
 		}
 		mailbox.ForwardToEmail = firstNonEmpty(strings.ToLower(strings.TrimSpace(remote.ForwardToEmail)), mailbox.ForwardToEmail)
+		// 外部取码地址只在明确给出时覆盖，避免一次不带 URL 的导入把已有令牌抹掉。
+		if strings.TrimSpace(remote.CodeAPIURL) != "" {
+			mailbox.CodeAPIURL = strings.TrimSpace(remote.CodeAPIURL)
+		}
 		if strings.TrimSpace(remote.Label) != "" {
 			mailbox.Label = strings.TrimSpace(remote.Label)
 		}
@@ -154,7 +158,8 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		ID: id, OwnerID: ownerID, Provider: domain.NormalizeProvider(remote.Provider), AccountID: strings.TrimSpace(accountID), AnonymousID: strings.TrimSpace(remote.AnonymousID),
 		RemoteOrigin: strings.TrimSpace(remote.Origin), Label: firstNonEmpty(remote.Label, "隐私邮箱 "+now.Format("0102-150405")),
 		Email: email, ForwardToEmail: strings.ToLower(strings.TrimSpace(remote.ForwardToEmail)), APIToken: token, APIActive: true, ICloudActive: remote.IsActive, Status: status,
-		Note: firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
+		CodeAPIURL: strings.TrimSpace(remote.CodeAPIURL),
+		Note:       firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
 	}
 	mailboxChange, _, err := s.upsertEntityTx(tx, "mailboxes", "mailbox", mailbox.ID, mailbox)
 	if err != nil {

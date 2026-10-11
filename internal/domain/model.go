@@ -13,6 +13,9 @@ const (
 	ProviderICloud    = "icloud"
 	ProviderMicrosoft = "microsoft"
 	ProviderGoogle    = "google"
+	// ProviderExternal 表示没有母号、没有登录密码的裸邮箱：
+	// 只有一个第三方取码接口，靠那个 URL 里的令牌取信。
+	ProviderExternal = "external"
 )
 
 const (
@@ -120,23 +123,28 @@ func NormalizeProvider(provider string) string {
 		return ProviderMicrosoft
 	case ProviderGoogle:
 		return ProviderGoogle
+	case ProviderExternal:
+		return ProviderExternal
 	}
 	return ProviderICloud
 }
 
 type Mailbox struct {
-	ID                string    `json:"id"`
-	OwnerID           string    `json:"owner_id,omitempty"`
-	Provider          string    `json:"provider,omitempty"`
-	AccountID         string    `json:"account_id,omitempty"`
-	AnonymousID       string    `json:"anonymous_id,omitempty"`
-	RemoteOrigin      string    `json:"remote_origin,omitempty"`
-	Label             string    `json:"label"`
-	Email             string    `json:"email"`
-	ForwardToEmail    string    `json:"forward_to_email,omitempty"`
-	APIToken          string    `json:"api_token,omitempty"`
-	APIActive         bool      `json:"api_active"`
-	ICloudActive      bool      `json:"icloud_active"`
+	ID             string `json:"id"`
+	OwnerID        string `json:"owner_id,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	AccountID      string `json:"account_id,omitempty"`
+	AnonymousID    string `json:"anonymous_id,omitempty"`
+	RemoteOrigin   string `json:"remote_origin,omitempty"`
+	Label          string `json:"label"`
+	Email          string `json:"email"`
+	ForwardToEmail string `json:"forward_to_email,omitempty"`
+	APIToken       string `json:"api_token,omitempty"`
+	APIActive      bool   `json:"api_active"`
+	ICloudActive   bool   `json:"icloud_active"`
+	// CodeAPIURL 是外部取码接口的完整地址，只对 ProviderExternal 有意义。
+	// 它内嵌了访问令牌，所以落库时必须和 api_token 一样加密。
+	CodeAPIURL        string    `json:"code_api_url,omitempty"`
 	ReceiveCount      int       `json:"receive_count"`
 	Status            string    `json:"status"`
 	Note              string    `json:"note"`
@@ -198,6 +206,8 @@ type RemoteMailbox struct {
 	Note           string `json:"note,omitempty"`
 	IsActive       bool   `json:"is_active"`
 	Origin         string `json:"origin,omitempty"`
+	// CodeAPIURL 只在导入外部取码邮箱时给出，落库前会加密。
+	CodeAPIURL string `json:"code_api_url,omitempty"`
 }
 
 type Event struct {
