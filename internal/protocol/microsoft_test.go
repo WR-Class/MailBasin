@@ -214,6 +214,81 @@ func TestListAliasesParsesProxyAddresses(t *testing.T) {
 	}
 }
 
+// 主地址由 proxyAddresses 前缀的大小写标记：大写 SMTP 是主地址，小写 smtp 是别名。
+// 这正是之前被丢掉的信息——丢掉之后主邮箱就被当成了别名。
+func TestListAddressesSeparatesPrimaryFromAliases(t *testing.T) {
+	client := newTestGraphClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mail":              "Primary@Outlook.com",
+			"userPrincipalName": "primary@outlook.com",
+			"proxyAddresses": []string{
+				"SMTP:Primary@Outlook.com",
+				"smtp:alias-one@outlook.com",
+				"smtp:ALIAS-TWO@outlook.com",
+				"smtp:alias-one@outlook.com",
+			},
+		})
+	})
+	primary, aliases, err := client.ListAddresses(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("拆分地址失败：%v", err)
+	}
+	if primary != "primary@outlook.com" {
+		t.Fatalf("主地址不正确：got=%q want=%q", primary, "primary@outlook.com")
+	}
+	want := []string{"alias-one@outlook.com", "alias-two@outlook.com"}
+	if len(aliases) != len(want) {
+		t.Fatalf("别名数量不正确：got=%v want=%v", aliases, want)
+	}
+	for index := range want {
+		if aliases[index] != want[index] {
+			t.Fatalf("别名解析不正确：got=%v want=%v", aliases, want)
+		}
+	}
+}
+
+// mail 字段缺失时，大写 SMTP 那条就是主地址。
+func TestListAddressesUsesUppercaseMarkerWhenMailMissing(t *testing.T) {
+	client := newTestGraphClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"proxyAddresses": []string{
+				"smtp:alias@outlook.com",
+				"SMTP:Primary@Outlook.com",
+			},
+		})
+	})
+	primary, aliases, err := client.ListAddresses(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("拆分地址失败：%v", err)
+	}
+	if primary != "primary@outlook.com" {
+		t.Fatalf("无 mail 字段时应取大写 SMTP 标记：got=%q", primary)
+	}
+	if len(aliases) != 1 || aliases[0] != "alias@outlook.com" {
+		t.Fatalf("别名不正确：%v", aliases)
+	}
+}
+
+// 完全没有标记时退回旧行为：全部地址并入别名，主地址留空，不猜。
+func TestListAddressesWithoutMarkerKeepsUnionBehaviour(t *testing.T) {
+	client := newTestGraphClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"proxyAddresses": []string{"one@outlook.com", "two@outlook.com"},
+		})
+	})
+	primary, aliases, err := client.ListAddresses(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("拆分地址失败：%v", err)
+	}
+	if primary != "" {
+		t.Fatalf("没有标记时不应猜主地址：got=%q", primary)
+	}
+	want := []string{"one@outlook.com", "two@outlook.com"}
+	if len(aliases) != len(want) || aliases[0] != want[0] || aliases[1] != want[1] {
+		t.Fatalf("无标记时应全部按别名返回：got=%v want=%v", aliases, want)
+	}
+}
+
 func TestListAliasesRejectsMissingToken(t *testing.T) {
 	client := NewGraphClient()
 	if _, err := client.ListAliases(context.Background(), ""); ErrorDetailsCode(err) != "microsoft_access_token_missing" {

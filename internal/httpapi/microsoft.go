@@ -278,6 +278,17 @@ func (s *Server) handleMicrosoftAliasImport(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
 }
 
+// handleMicrosoftPrimaryImport 只导入账号的主地址，对应谷歌那边的「导入主地址」。
+func (s *Server) handleMicrosoftPrimaryImport(w http.ResponseWriter, r *http.Request) {
+	accountID := strings.TrimSpace(r.PathValue("id"))
+	result, err := s.mailbox.ImportMicrosoftPrimary(r.Context(), accountID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
+}
+
 // handleMicrosoftMailboxCreate 手工添加单个别名地址。
 func (s *Server) handleMicrosoftMailboxCreate(w http.ResponseWriter, r *http.Request) {
 	accountID := strings.TrimSpace(r.PathValue("id"))

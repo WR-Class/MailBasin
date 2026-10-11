@@ -139,7 +139,96 @@ func (s *Service) MicrosoftAliases(ctx context.Context, accountID string) ([]str
 	return aliases, nil
 }
 
-// ImportMicrosoftAliases 把账号上的别名批量写入邮箱池，已存在的地址只更新归属与状态。
+const (
+	microsoftPrimaryNote    = "Microsoft 主地址，导入自账号信息"
+	microsoftAliasNote      = "Microsoft 别名，导入自账号代理地址"
+	microsoftAliasOldOrigin = "microsoft_alias"
+)
+
+// importMicrosoftAddress 写入一个微软地址，按它是不是主地址选 origin 和备注。
+// 主地址必须和别名区分开：以前一律按别名写入，邮箱池里就把主邮箱标成了「别名」。
+func (s *Service) importMicrosoftAddress(accountID, address string, isPrimary bool, result *MicrosoftAliasImportResult) error {
+	email := strings.ToLower(strings.TrimSpace(address))
+	if _, err := mail.ParseAddress(email); err != nil {
+		return nil
+	}
+	origin, note := microsoftAliasOldOrigin, microsoftAliasNote
+	if isPrimary {
+		origin, note = "microsoft_primary", microsoftPrimaryNote
+	}
+	mailbox, created, err := s.store.UpsertMailboxFromRemote(accountID, domain.RemoteMailbox{
+		Provider: domain.ProviderMicrosoft,
+		Email:    email,
+		Label:    email,
+		IsActive: true,
+		Origin:   origin,
+	}, note)
+	if err != nil {
+		return fmt.Errorf("导入地址 %s 失败：%w", email, err)
+	}
+	// UpsertMailboxFromRemote 只在备注为空时写默认值，所以旧版本按别名写入的主地址
+	// 会一直留着「别名」这条错误备注。这里只在备注正好还是旧默认值时纠正它，
+	// 不覆盖用户自己写过的备注。
+	if isPrimary && !created && mailbox.Note == microsoftAliasNote {
+		corrected := microsoftPrimaryNote
+		if _, err := s.store.SetMailboxStatus(mailbox.ID, nil, nil, "", &corrected); err != nil {
+			return fmt.Errorf("纠正 %s 的备注失败：%w", email, err)
+		}
+	}
+	if created {
+		result.Created++
+	} else {
+		result.Updated++
+	}
+	return nil
+}
+
+// MicrosoftPrimaryAddress 返回账号的主地址。
+func (s *Service) MicrosoftPrimaryAddress(ctx context.Context, accountID string) (string, error) {
+	accountID = strings.TrimSpace(accountID)
+	token, _, err := s.MicrosoftAccessToken(ctx, accountID)
+	if err != nil {
+		return "", err
+	}
+	primary, _, err := s.graph.ListAddresses(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	if primary == "" {
+		return "", errors.New("Microsoft 未返回主地址，请稍后重试")
+	}
+	s.markMicrosoftSessionSuccess(accountID)
+	return primary, nil
+}
+
+// ImportMicrosoftPrimary 只导入账号的主地址，对应谷歌那边「导入主地址」的用法。
+// 用户手工在 account.microsoft.com 建别名之前，至少能先把主邮箱放进邮箱池。
+func (s *Service) ImportMicrosoftPrimary(ctx context.Context, accountID string) (MicrosoftAliasImportResult, error) {
+	accountID = strings.TrimSpace(accountID)
+	account, ok := s.store.FindAppleAccount(accountID)
+	if !ok {
+		return MicrosoftAliasImportResult{}, errors.New("Microsoft 账号不存在")
+	}
+	if account.ProviderOrDefault() != domain.ProviderMicrosoft {
+		return MicrosoftAliasImportResult{}, errors.New("该账号不是 Microsoft 账号")
+	}
+	primary, err := s.MicrosoftPrimaryAddress(ctx, accountID)
+	if err != nil {
+		return MicrosoftAliasImportResult{}, err
+	}
+	result := MicrosoftAliasImportResult{AccountID: accountID, Found: 1, Aliases: []string{primary}}
+	if err := s.importMicrosoftAddress(accountID, primary, true, &result); err != nil {
+		return result, err
+	}
+	if result.Created > 0 || result.Updated > 0 {
+		_ = s.store.RecordEvent("info", "microsoft", fmt.Sprintf(
+			"Microsoft 主地址导入完成：新增 %d 个，更新 %d 个", result.Created, result.Updated))
+	}
+	return result, nil
+}
+
+// ImportMicrosoftAliases 把账号上的全部地址（主地址 + 别名）批量写入邮箱池，
+// 已存在的地址只更新归属与状态。主地址标 microsoft_primary，别名标 microsoft_alias。
 func (s *Service) ImportMicrosoftAliases(ctx context.Context, accountID string) (MicrosoftAliasImportResult, error) {
 	accountID = strings.TrimSpace(accountID)
 	account, ok := s.store.FindAppleAccount(accountID)
@@ -149,30 +238,29 @@ func (s *Service) ImportMicrosoftAliases(ctx context.Context, accountID string) 
 	if account.ProviderOrDefault() != domain.ProviderMicrosoft {
 		return MicrosoftAliasImportResult{}, errors.New("该账号不是 Microsoft 账号")
 	}
-	aliases, err := s.MicrosoftAliases(ctx, accountID)
+	token, session, err := s.MicrosoftAccessToken(ctx, accountID)
 	if err != nil {
 		return MicrosoftAliasImportResult{}, err
 	}
-	result := MicrosoftAliasImportResult{AccountID: accountID, Found: len(aliases), Aliases: aliases}
-	for _, alias := range aliases {
-		email := strings.ToLower(strings.TrimSpace(alias))
-		if _, err := mail.ParseAddress(email); err != nil {
-			continue
+	primary, aliases, err := s.graph.ListAddresses(ctx, token)
+	if err != nil {
+		if protocol.ErrorDetailsCode(err) == "microsoft_token_rejected" {
+			// token 被拒时清掉本地过期凭据，让下一次调用走完整续期。
+			session.TokenExpiresAt = time.Time{}
+			_, _ = s.store.SaveMicrosoftSession(session)
 		}
-		_, created, err := s.store.UpsertMailboxFromRemote(accountID, domain.RemoteMailbox{
-			Provider: domain.ProviderMicrosoft,
-			Email:    email,
-			Label:    email,
-			IsActive: true,
-			Origin:   "microsoft_alias",
-		}, "Microsoft 别名，导入自账号代理地址")
-		if err != nil {
-			return result, fmt.Errorf("导入别名 %s 失败：%w", email, err)
-		}
-		if created {
-			result.Created++
-		} else {
-			result.Updated++
+		return MicrosoftAliasImportResult{}, err
+	}
+	s.markMicrosoftSessionSuccess(accountID)
+	addresses := append([]string{}, aliases...)
+	if primary != "" {
+		addresses = append(addresses, primary)
+	}
+	result := MicrosoftAliasImportResult{AccountID: accountID, Found: len(addresses), Aliases: addresses}
+	for _, address := range addresses {
+		isPrimary := primary != "" && strings.EqualFold(address, primary)
+		if err := s.importMicrosoftAddress(accountID, address, isPrimary, &result); err != nil {
+			return result, err
 		}
 	}
 	if result.Created > 0 || result.Updated > 0 {

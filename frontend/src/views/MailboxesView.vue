@@ -99,17 +99,34 @@ const mailboxDetailStatusOptions = [
   { value: 'failed', label: '失败', dot: 'bg-rose-500' },
   { value: 'disabled', label: '已停用', dot: 'bg-slate-500' },
 ]
-const accountOptions = computed(() => accounts.value.map((account) => ({ value: account.id, label: account.label || account.apple_id || account.id })))
+// 三个服务商的账号来自各自的接口，这里合并成一个列表，每条打上 provider 标记。
+// 筛选、分组、列显示和按账号的操作都依赖这个标记。
+const PROVIDER_LABELS = { icloud: 'iCloud', microsoft: 'Microsoft', google: 'Google' }
+const ACCOUNT_ENDPOINTS = [
+  ['icloud', '/api/apple-accounts'],
+  ['microsoft', '/api/microsoft-accounts'],
+  ['google', '/api/google-accounts'],
+]
+function providerLabel(provider) {
+  return PROVIDER_LABELS[provider] || provider || 'iCloud'
+}
+function accountName(account) {
+  return account?.label || account?.apple_id || account?.id
+}
+function accountOptionLabel(account) {
+  return `${accountName(account)}（${providerLabel(account?.provider)}）`
+}
+const accountOptions = computed(() => accounts.value.map((account) => ({ value: account.id, label: accountOptionLabel(account) })))
 const accountByID = computed(() => new Map(accounts.value.map((account) => [account.id, account])))
 const accountFilterOptions = computed(() => [
-  { value: '', label: '全部 Apple 账号', description: '显示所有账号创建的邮箱', dot: 'bg-slate-400' },
+  { value: '', label: '全部账号', description: '显示所有服务商的邮箱', dot: 'bg-slate-400' },
   ...accounts.value.map((account) => ({
     value: account.id,
-    label: account.label || account.apple_id || account.id,
-    description: account.label && account.apple_id && account.label !== account.apple_id ? account.apple_id : '只显示此账号创建的邮箱',
+    label: accountOptionLabel(account),
+    description: account.label && account.apple_id && account.label !== account.apple_id ? account.apple_id : `只显示此 ${providerLabel(account.provider)} 账号创建的邮箱`,
   })),
 ])
-const syncAccountOptions = computed(() => [{ value: '', label: '全部 Apple 账号', dot: 'bg-slate-400' }, ...accounts.value.map((account) => ({ value: account.id, label: `${account.label || account.apple_id || account.id}（${account.apple_id}）` }))])
+const syncAccountOptions = computed(() => [{ value: '', label: '全部账号', dot: 'bg-slate-400' }, ...accounts.value.map((account) => ({ value: account.id, label: `${accountName(account)}（${providerLabel(account.provider)}）` }))])
 const hasRowBusyActions = computed(() => Object.keys(rowBusyActions.value).length > 0)
 const codeDialogBusy = computed(() => isBusy('code') || Boolean(codeMailbox.value?.id && rowBusyAction(codeMailbox.value.id) === 'code'))
 const quickEditTitle = computed(() => quickEditField.value === 'note' ? '修改备注' : '修改邮箱状态')
@@ -134,9 +151,17 @@ function statusLabel(value) {
   return ({ available: '可用', reserved: '已预留', used: '已使用', failed: '失败', disabled: '已停用', active: '活跃' })[value] || value || '未知'
 }
 
+// 账号列：优先用账号列表里的名字；账号不在列表里时退回邮箱自己带的 provider 标记，
+// 而不是把一串 UUID 直接显示出来。
 function mailboxAppleAccount(mailbox) {
   const account = accountByID.value.get(mailbox?.account_id)
-  return account?.apple_id || account?.label || mailbox?.account_id || '—'
+  if (account) return accountName(account)
+  return mailbox?.account_id ? `${providerLabel(mailbox?.provider)}（账号未加载）` : '—'
+}
+
+function mailboxProvider(mailbox) {
+  const account = accountByID.value.get(mailbox?.account_id)
+  return account?.provider || mailbox?.provider || 'icloud'
 }
 
 function statusClass(value) {
@@ -530,7 +555,7 @@ async function loadExistingMailboxMessageSyncStatus() {
 
 function openSyncDialog() {
   if (!accounts.value.length) {
-    flash('请先添加 Apple 账号和登录态', true)
+    flash('请先添加账号（iCloud 账号还需要有效的登录态）', true)
     return
   }
   syncAccountID.value = ''
@@ -717,12 +742,28 @@ async function refreshMailboxPool() {
   }
 }
 
+// 并行拉取三个服务商的账号并合并。
+// 单个接口失败（例如某个模块被关掉）不能清空整个列表，所以逐个兜住错误，
+// 只有三个都失败才提示。
 async function loadAccounts() {
-  try {
-    const data = await api('/api/apple-accounts')
-    accounts.value = data.items || []
-  } catch (err) {
-    flash(err.message, true)
+  const merged = []
+  let failed = 0
+  await Promise.all(ACCOUNT_ENDPOINTS.map(async ([provider, path]) => {
+    try {
+      const data = await api(path)
+      for (const item of data.items || []) merged.push({ ...item, provider: item.provider || provider })
+    } catch {
+      failed += 1
+    }
+  }))
+  merged.sort((left, right) => {
+    const order = (value) => ACCOUNT_ENDPOINTS.findIndex(([provider]) => provider === (value?.provider || 'icloud'))
+    const delta = order(left) - order(right)
+    return delta !== 0 ? delta : accountName(left).localeCompare(accountName(right), 'zh-Hans-CN')
+  })
+  accounts.value = merged
+  if (failed === ACCOUNT_ENDPOINTS.length) {
+    flash('读取账号列表失败，请检查各服务商的授权状态', true)
   }
 }
 
@@ -808,13 +849,31 @@ async function importMailbox() {
   }
 }
 
+// 「同步已有邮箱」按账号所属服务商走各自的接口。
+// iCloud 是 Hide My Email 的同步接口，微软和谷歌是别名导入接口；
+// 两者返回的统计字段不同，这里统一折算成「发现多少个地址」。
+function providerSyncPath(account) {
+  const provider = account?.provider || 'icloud'
+  if (provider === 'microsoft') return `/api/microsoft-accounts/${account.id}/aliases/import`
+  if (provider === 'google') return `/api/google-accounts/${account.id}/aliases/import`
+  return `/api/apple-accounts/${account.id}/mailboxes/sync`
+}
+
+function syncResultCount(data) {
+  if (!data) return 0
+  if (typeof data.count === 'number') return data.count
+  if (Array.isArray(data.items)) return data.items.length
+  if (typeof data.found === 'number') return data.found
+  return (Number(data.created) || 0) + (Number(data.updated) || 0)
+}
+
 async function syncExistingMailboxes() {
   if (isBusy('sync-existing')) return
   const targets = syncAccountID.value
     ? accounts.value.filter((item) => item.id === syncAccountID.value)
     : accounts.value
   if (!targets.length) {
-    flash('没有可同步的 Apple 账号', true)
+    flash('没有可同步的账号，请先添加账号', true)
     return
   }
   startBusy('sync-existing')
@@ -831,11 +890,11 @@ async function syncExistingMailboxes() {
         0,
       )
       try {
-        const data = await api(`/api/apple-accounts/${account.id}/mailboxes/sync`, { method: 'POST', body: '{}' })
-        total += data.count || data.items?.length || 0
+        const data = await api(providerSyncPath(account), { method: 'POST', body: '{}' })
+        total += syncResultCount(data)
         succeeded += 1
       } catch (err) {
-        failures.push(`${account.label || account.apple_id || account.id}：${err.message}`)
+        failures.push(`${accountName(account)}：${err.message}`)
       }
     }
     showSync.value = false
@@ -1368,7 +1427,7 @@ onBeforeUnmount(() => {
       <div ref="mailboxCommandBar" class="mailbox-command-bar">
         <div class="mailbox-command-filters">
           <label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱、标签或备注" aria-label="搜索邮箱、标签或备注" /></label>
-          <CardSelect v-model="accountID" class="mailbox-account-filter" :options="accountFilterOptions" aria-label="Apple 账号" compact />
+          <CardSelect v-model="accountID" class="mailbox-account-filter" :options="accountFilterOptions" aria-label="账号" compact />
           <CardSelect v-model="status" class="mailbox-status-filter" :options="mailboxStatusOptions" aria-label="邮箱状态" compact />
         </div>
         <div class="mailbox-command-actions">
@@ -1384,11 +1443,11 @@ onBeforeUnmount(() => {
       <div ref="mailboxTableViewport" class="mailbox-table-viewport" :style="{ '--mailbox-table-height': `${mailboxTableHeight}px`, '--mailbox-empty-height': `${mailboxEmptyHeight}px` }">
         <table class="mailbox-pool-table" :class="{ 'mailbox-pool-table-empty': !result.items?.length }">
           <colgroup v-if="result.items?.length"><col class="mailbox-col-id" /><col class="mailbox-col-account" /><col class="mailbox-col-email" /><col class="mailbox-col-label" /><col class="mailbox-col-status" /><col class="mailbox-col-channel" /><col class="mailbox-col-count" /><col class="mailbox-col-sync" /><col class="mailbox-col-actions" /></colgroup>
-          <thead><tr><th><label class="mailbox-select-all"><input type="checkbox" :checked="allPageMailboxesSelected" :indeterminate="somePageMailboxesSelected" :disabled="!result.items?.length" aria-label="全选当前页邮箱" @change="toggleAllMailboxSelection" /><span>ID</span></label></th><th>Apple 账号</th><th>邮箱</th><th>标签 / 备注</th><th>状态</th><th>API / iCloud</th><th>收件</th><th>最近同步</th><th>操作</th></tr></thead>
+          <thead><tr><th><label class="mailbox-select-all"><input type="checkbox" :checked="allPageMailboxesSelected" :indeterminate="somePageMailboxesSelected" :disabled="!result.items?.length" aria-label="全选当前页邮箱" @change="toggleAllMailboxSelection" /><span>ID</span></label></th><th>账号</th><th>邮箱</th><th>标签 / 备注</th><th>状态</th><th>API / iCloud</th><th>收件</th><th>最近同步</th><th>操作</th></tr></thead>
           <tbody>
             <tr v-for="mailbox in result.items" :key="mailbox.id" :class="{ 'mailbox-row-selected': isMailboxSelected(mailbox.id) }">
               <td class="mailbox-id-cell"><label class="mailbox-id-wrap"><input type="checkbox" :checked="isMailboxSelected(mailbox.id)" :disabled="isMailboxDeleteBusy(mailbox.id)" :aria-label="`选择邮箱 ${mailbox.email}`" @change="toggleMailboxSelection(mailbox)" /><span :title="mailbox.id">{{ mailbox.id }}</span></label></td>
-              <td class="mailbox-account-cell"><span :title="mailboxAppleAccount(mailbox)">{{ mailboxAppleAccount(mailbox) }}</span></td>
+              <td class="mailbox-account-cell"><span :title="mailboxAppleAccount(mailbox)">{{ mailboxAppleAccount(mailbox) }}</span><span class="ml-1 shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-700 dark:text-slate-300" :title="`服务商：${providerLabel(mailboxProvider(mailbox))}`">{{ providerLabel(mailboxProvider(mailbox)) }}</span></td>
               <td class="mailbox-email-cell"><button type="button" class="mailbox-email-copy" :title="`点击复制邮箱：${mailbox.email}`" @click.stop="copyMailboxEmail(mailbox)">{{ mailbox.email }}</button></td>
               <td class="mailbox-label-cell"><span :title="mailbox.label || '—'">{{ mailbox.label || '—' }}</span><button type="button" :title="mailbox.note ? `点击修改备注：${mailbox.note}` : '点击添加备注'" @click.stop="openQuickEdit(mailbox, 'note')">{{ mailbox.note || '添加备注' }}</button></td>
               <td><button type="button" :class="statusClass(mailbox.status)" class="mailbox-status-button" title="点击修改邮箱状态" @click.stop="openQuickEdit(mailbox, 'status')">{{ statusLabel(mailbox.status) }}</button></td>
@@ -1404,7 +1463,7 @@ onBeforeUnmount(() => {
                 </div>
               </td>
             </tr>
-            <tr v-if="!loading && !result.items?.length" class="mailbox-empty-row"><td colspan="9" class="mailbox-empty-cell"><span><Boxes :size="20" /></span><strong>没有符合条件的邮箱</strong><small>从 Apple 账号页创建或同步隐私邮箱后会显示在这里。</small></td></tr>
+            <tr v-if="!loading && !result.items?.length" class="mailbox-empty-row"><td colspan="9" class="mailbox-empty-cell"><span><Boxes :size="20" /></span><strong>没有符合条件的邮箱</strong><small>从 iCloud、Microsoft 或 Google 账号页创建或同步邮箱后会显示在这里。</small></td></tr>
           </tbody>
         </table>
       </div>
@@ -1416,7 +1475,7 @@ onBeforeUnmount(() => {
         <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="import-mailbox-title" @submit.prevent="importMailbox">
           <header class="mailbox-dialog-heading"><div><h2 id="import-mailbox-title"><MailPlus :size="18" />导入已有隐私邮箱</h2><p>只创建或更新本地记录，不会在 Apple 服务器新建邮箱。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('import')" @click="showImport = false"><X :size="16" /></button></header>
           <div class="mailbox-dialog-grid">
-            <div class="form-group"><span class="form-label">绑定 Apple 账号</span><CardSelect v-model="mailboxImport.account_id" :options="accountOptions" placeholder="请选择 Apple 账号" aria-label="绑定 Apple 账号" /></div>
+            <div class="form-group"><span class="form-label">绑定账号</span><CardSelect v-model="mailboxImport.account_id" :options="accountOptions" placeholder="请选择账号" aria-label="绑定账号" /></div>
             <label class="form-group"><span class="form-label">隐私邮箱地址</span><input v-model.trim="mailboxImport.email" type="email" class="field" placeholder="example@icloud.com" required /></label>
             <label class="form-group"><span class="form-label">标签</span><input v-model.trim="mailboxImport.label" class="field" placeholder="例如：手动导入" /></label>
             <label class="form-group"><span class="form-label">备注</span><input v-model.trim="mailboxImport.note" class="field" placeholder="可选" /></label>
@@ -1427,7 +1486,7 @@ onBeforeUnmount(() => {
 
       <div v-if="showSync" class="mailbox-dialog-backdrop" role="presentation" @click.self="showSync = false">
         <form class="panel mailbox-operation-dialog mailbox-sync-dialog" role="dialog" aria-modal="true" aria-labelledby="sync-mailboxes-title" @submit.prevent="syncExistingMailboxes">
-          <header class="mailbox-dialog-heading"><div><h2 id="sync-mailboxes-title"><CloudDownload :size="18" />同步已有邮箱</h2><p>从所选 Apple 账号读取已有隐私邮箱，并更新到本地邮箱池。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('sync-existing')" @click="showSync = false"><X :size="16" /></button></header>
+          <header class="mailbox-dialog-heading"><div><h2 id="sync-mailboxes-title"><CloudDownload :size="18" />同步已有邮箱</h2><p>从所选账号读取已有邮箱地址，并更新到本地邮箱池。iCloud 走 Hide My Email，Microsoft 和 Google 走别名导入。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('sync-existing')" @click="showSync = false"><X :size="16" /></button></header>
           <div class="mailbox-sync-fields"><div class="form-group"><span class="form-label">同步范围</span><CardSelect v-model="syncAccountID" :options="syncAccountOptions" aria-label="同步范围" /><span class="form-help">同步使用账号已保存的 iCloud Web 旧接口登录态。</span></div></div>
           <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('sync-existing')" @click="showSync = false">取消</button><button class="primary-button" :disabled="isBusy('sync-existing')"><LoaderCircle v-if="isBusy('sync-existing')" :size="15" class="animate-spin" /><CloudDownload v-else :size="15" />{{ isBusy('sync-existing') ? '同步中' : '开始同步' }}</button></footer>
         </form>

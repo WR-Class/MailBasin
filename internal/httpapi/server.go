@@ -89,6 +89,10 @@ func New(cfg config.Config, state *store.Store, logger *slog.Logger) *Server {
 		googleFlows:      make(map[string]domain.GoogleAuthFlow),
 	}
 	state.SetChangeLogLimit(cfg.DatabaseChangeLogLimit)
+	// 更新检查要访问 raw.githubusercontent.com，必须和其它联网模块用同一套代理：
+	// Go 的默认 Transport 只认环境变量、不读 Windows 系统代理，不注入的话
+	// 在需要代理的网络里「检查更新」必然失败（表现为连接被强制关闭）。
+	s.updates.SetHTTPClient(protocol.NewHTTPClient(cfg.GoogleProxy, 20*time.Second))
 	s.scheduler = scheduler.NewService(state, s.mailbox)
 	s.watcher = mailwatcher.NewService(cfg, state, s.mailbox, logger)
 	s.keepAliveState = s.apple.KeepAliveState
@@ -142,6 +146,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/check", s.protected(s.handleMicrosoftAccountCheck))
 	s.mux.HandleFunc("GET /api/microsoft-accounts/{id}/aliases", s.protected(s.handleMicrosoftAliases))
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/aliases/import", s.protected(s.handleMicrosoftAliasImport))
+	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/aliases/import-primary", s.protected(s.handleMicrosoftPrimaryImport))
 	s.mux.HandleFunc("POST /api/microsoft-accounts/{id}/mailboxes", s.protected(s.handleMicrosoftMailboxCreate))
 	s.mux.HandleFunc("GET /api/google/status", s.protected(s.handleGoogleStatus))
 	s.mux.HandleFunc("PUT /api/google/settings", s.protected(s.handleGoogleSettings))

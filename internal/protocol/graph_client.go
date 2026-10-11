@@ -204,49 +204,22 @@ func (c *GraphClient) getMessagesPage(ctx context.Context, accessToken, endpoint
 	return list, nil
 }
 
-// ListAliases 读取账号上的全部代理地址，用于把用户手工创建的 Outlook 别名批量导入邮箱池。
-// Graph 不提供创建别名的接口，因此这里只做发现，不做创建。
-func (c *GraphClient) ListAliases(ctx context.Context, accessToken string) ([]string, error) {
-	accessToken = strings.TrimSpace(accessToken)
-	if accessToken == "" {
-		return nil, errCode("microsoft_access_token_missing", "缺少 access_token，请先登录 Microsoft 账号", false)
-	}
-	endpoint := c.baseURL + "/me?" + url.Values{
-		"$select": {"mail,userPrincipalName,proxyAddresses"},
-	}.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+// ListAddresses 把账号上的地址拆成主地址和别名。
+//
+// Exchange 用 proxyAddresses 条目的前缀大小写标记主地址：
+// "SMTP:primary@outlook.com" 大写＝主地址，"smtp:alias@outlook.com" 小写＝别名。
+// Graph 没有单独字段表达它，大小写是唯一依据——之前这里把前缀一律切掉，
+// 主地址就被当成了别名。Graph 返回的 mail 字段本身就是主 SMTP 地址，优先采用。
+func (c *GraphClient) ListAddresses(ctx context.Context, accessToken string) (string, []string, error) {
+	profile, err := c.fetchMailProfile(ctx, accessToken)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, errCode("microsoft_graph_unreachable", "请求 Microsoft Graph 失败："+err.Error(), true)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, errCode("microsoft_graph_read_failed", "读取 Microsoft Graph 响应失败："+err.Error(), true)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, microsoftGraphError(resp.StatusCode, body, "读取 Microsoft 别名失败")
-	}
-	var out struct {
-		Mail              string   `json:"mail"`
-		UserPrincipalName string   `json:"userPrincipalName"`
-		ProxyAddresses    []string `json:"proxyAddresses"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, errCode("microsoft_graph_parse_failed", "解析 Microsoft 别名响应失败："+err.Error(), true)
-	}
+	primary := normalizeMailAddress(profile.Mail)
+	aliases := make([]string, 0, len(profile.ProxyAddresses)+1)
 	seen := map[string]struct{}{}
-	aliases := make([]string, 0, len(out.ProxyAddresses)+2)
-	appendAlias := func(raw string) {
-		address := normalizeMailAddress(raw)
-		if address == "" {
+	appendAlias := func(address string) {
+		if address == "" || address == primary {
 			return
 		}
 		if _, ok := seen[address]; ok {
@@ -255,18 +228,86 @@ func (c *GraphClient) ListAliases(ctx context.Context, accessToken string) ([]st
 		seen[address] = struct{}{}
 		aliases = append(aliases, address)
 	}
-	for _, raw := range out.ProxyAddresses {
-		// proxyAddresses 的条目形如 "SMTP:primary@outlook.com" 或 "smtp:alias@outlook.com"。
-		address := raw
-		if index := strings.Index(raw, ":"); index >= 0 {
-			address = raw[index+1:]
+	for _, raw := range profile.ProxyAddresses {
+		address, markedPrimary := splitProxyAddress(raw)
+		// 没有 mail 字段时，大写 SMTP 标记的那条就是主地址。
+		if markedPrimary && primary == "" {
+			primary = address
+			continue
 		}
 		appendAlias(address)
 	}
-	appendAlias(out.Mail)
-	appendAlias(out.UserPrincipalName)
+	appendAlias(normalizeMailAddress(profile.UserPrincipalName))
 	sort.Strings(aliases)
-	return aliases, nil
+	return primary, aliases, nil
+}
+
+// splitProxyAddress 拆开 "SMTP:address" 形式的条目，并报告它是否被标记为主地址。
+// 没有前缀的条目按别名处理（沿用旧行为）。
+func splitProxyAddress(raw string) (string, bool) {
+	index := strings.Index(raw, ":")
+	if index < 0 {
+		return normalizeMailAddress(raw), false
+	}
+	return normalizeMailAddress(raw[index+1:]), raw[:index] == "SMTP"
+}
+
+// ListAliases 读取账号上的全部地址（主地址 + 别名），用于批量导入邮箱池。
+// Graph 不提供创建别名的接口，因此这里只做发现，不做创建。
+func (c *GraphClient) ListAliases(ctx context.Context, accessToken string) ([]string, error) {
+	primary, aliases, err := c.ListAddresses(ctx, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(aliases)+1)
+	if primary != "" {
+		out = append(out, primary)
+	}
+	out = append(out, aliases...)
+	sort.Strings(out)
+	return out, nil
+}
+
+// graphMailProfile 是 /me 上与本项目相关的那部分字段。
+type graphMailProfile struct {
+	Mail              string   `json:"mail"`
+	UserPrincipalName string   `json:"userPrincipalName"`
+	ProxyAddresses    []string `json:"proxyAddresses"`
+}
+
+func (c *GraphClient) fetchMailProfile(ctx context.Context, accessToken string) (graphMailProfile, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return graphMailProfile{}, errCode("microsoft_access_token_missing", "缺少 access_token，请先登录 Microsoft 账号", false)
+	}
+	endpoint := c.baseURL + "/me?" + url.Values{
+		"$select": {"mail,userPrincipalName,proxyAddresses"},
+	}.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return graphMailProfile{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return graphMailProfile{}, errCode("microsoft_graph_unreachable", "请求 Microsoft Graph 失败："+err.Error(), true)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return graphMailProfile{}, errCode("microsoft_graph_read_failed", "读取 Microsoft Graph 响应失败："+err.Error(), true)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return graphMailProfile{}, microsoftGraphError(resp.StatusCode, body, "读取 Microsoft 别名失败")
+	}
+	var out graphMailProfile
+	if err := json.Unmarshal(body, &out); err != nil {
+		return graphMailProfile{}, errCode("microsoft_graph_parse_failed", "解析 Microsoft 别名响应失败："+err.Error(), true)
+	}
+	return out, nil
 }
 
 // graphRecipientsOf 汇总一封邮件的所有收件人地址，用于别名分发。

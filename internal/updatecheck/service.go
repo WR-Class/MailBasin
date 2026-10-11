@@ -105,6 +105,23 @@ func New(enabled bool, repository string) *Service {
 	}
 }
 
+// SetHTTPClient 替换内部使用的 HTTP 客户端。
+//
+// 默认的 &http.Client{} 走 http.DefaultTransport，而 Go 的 DefaultTransport
+// 只认 HTTP_PROXY / HTTPS_PROXY 环境变量，从不读取 Windows 的系统代理设置。
+// 结果是：浏览器和 PowerShell 都能打开 raw.githubusercontent.com，本服务却报
+// "wsarecv: An existing connection was forcibly closed by the remote host"——
+// 看起来像代码问题，实际是没走代理。
+//
+// 所以在装配处注入一个走代理的客户端（见 protocol.NewHTTPClient），
+// 让更新检查和其它联网模块用同一套代理解析。
+func (s *Service) SetHTTPClient(client *http.Client) {
+	if client == nil {
+		return
+	}
+	s.client = client
+}
+
 // Check 通过仓库 Raw 公告清单检查项目版本和公告。
 func (s *Service) Check(ctx context.Context, force bool) Status {
 	now := time.Now()

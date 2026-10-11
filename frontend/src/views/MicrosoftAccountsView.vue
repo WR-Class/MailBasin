@@ -295,6 +295,23 @@ async function importAliases() {
   }
 }
 
+// 只导入主地址。微软的主地址由 proxyAddresses 的大写 SMTP 前缀标记，
+// 后端已经能区分它和别名，所以这里可以像谷歌一样单独导入主地址。
+async function importPrimary() {
+  if (!selected.value) return
+  if (!startBusy('import')) return
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases/import-primary`, { method: 'POST' })
+    aliases.value = result.aliases || []
+    flash(`主地址导入完成：新增 ${result.created} 个，更新 ${result.updated} 个`)
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('import')
+  }
+}
+
 function openAddAliasDialog() {
   if (!selected.value) {
     flash('请先选择一个 Microsoft 账号', true)
@@ -345,6 +362,7 @@ onBeforeUnmount(() => {
         <div class="apple-command-actions">
           <button class="primary-button apple-command-button" :disabled="!moduleReady" :title="moduleReady ? '使用设备码登录 Microsoft 账号' : 'Microsoft 模块已在配置中关闭'" @click="openLoginDialog"><Plus :size="14" />添加 Microsoft 账号</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('aliases')" :title="selected ? '从 Graph 读取该账号的全部邮件地址' : '请先选择一个 Microsoft 账号'" @click="discoverAliases"><LoaderCircle v-if="isBusy('aliases')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />发现别名</button>
+          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '只把该账号的主邮箱地址写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importPrimary"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Mail v-else :size="14" />导入主地址</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '把发现的别名写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importAliases"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Inbox v-else :size="14" />导入别名</button>
         </div>
       </header>
