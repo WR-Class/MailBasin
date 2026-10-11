@@ -2,8 +2,10 @@ package protocol
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/mail"
@@ -30,7 +32,73 @@ const (
 	gmailMaxPages    = 5
 	// gmailMaxFetchPerSync 限制单次同步最多取多少封正文，避免大收件箱把一轮同步拖太久。
 	gmailMaxFetchPerSync = 60
+
+	// MaxPlusAliasLocalPart 来自 RFC 5321 §4.5.3.1.1：@ 之前的本地部分最多 64 个字符。
+	// 超过这个长度 Gmail 会直接拒收，但地址本身照样能存进库、也能在列表里显示——
+	// 变成一个看起来正常、却永远收不到信的地址。所以必须在构造时就拦住。
+	MaxPlusAliasLocalPart = 64
+	// plusTagAlphabet 去掉了 i、l、o、0、1：这几个在抄写和朗读地址时最容易混淆。
+	plusTagAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	// DefaultPlusTagLength 是随机标签的默认长度，31^8 ≈ 8.5×10^11，碰撞可以忽略。
+	DefaultPlusTagLength = 8
 )
+
+// MaxPlusTagLength 返回这个主地址还能容纳多长的 + 标签。返回值小于 1 时无法生成别名。
+func MaxPlusTagLength(email string) int {
+	email = normalizeMailAddress(email)
+	at := strings.LastIndex(email, "@")
+	if at <= 0 {
+		return 0
+	}
+	local := email[:at]
+	if plus := strings.Index(local, "+"); plus >= 0 {
+		local = local[:plus]
+	}
+	return MaxPlusAliasLocalPart - len(local) - 1
+}
+
+// RandomPlusTag 生成一个随机 + 标签。prefix 非空时形如 "shop-a7k2m9p3"，为空时是纯随机串。
+// 用 crypto/rand 而不是 math/rand：这些地址是长期身份，不该可预测。
+func RandomPlusTag(prefix string, length int) (string, error) {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if length <= 0 {
+		length = DefaultPlusTagLength
+	}
+	suffix, err := randomFromAlphabet(length)
+	if err != nil {
+		return "", err
+	}
+	if prefix == "" {
+		return suffix, nil
+	}
+	return prefix + "-" + suffix, nil
+}
+
+// randomFromAlphabet 从 plusTagAlphabet 里等概率取 length 个字符。
+// 用拒绝采样而不是直接取模：31 不整除 256，取模会让前 8 个字符偏多。
+func randomFromAlphabet(length int) (string, error) {
+	if length <= 0 {
+		return "", nil
+	}
+	limit := byte(256 - (256 % len(plusTagAlphabet)))
+	out := make([]byte, 0, length)
+	buf := make([]byte, length*2)
+	for len(out) < length {
+		if _, err := rand.Read(buf); err != nil {
+			return "", errCode("google_alias_random_failed", "生成随机 + 标签失败："+err.Error(), true)
+		}
+		for _, value := range buf {
+			if value >= limit {
+				continue
+			}
+			out = append(out, plusTagAlphabet[int(value)%len(plusTagAlphabet)])
+			if len(out) == length {
+				break
+			}
+		}
+	}
+	return string(out), nil
+}
 
 type GmailClient struct {
 	httpClient *http.Client
@@ -304,6 +372,13 @@ func BuildPlusAlias(email, tag string) (string, error) {
 	// 主地址本身已经带 + 时，替换而不是叠加，避免 you+a+b@gmail.com 这种歧义地址。
 	if plus := strings.Index(local, "+"); plus >= 0 {
 		local = local[:plus]
+	}
+	// RFC 5321 的长度上限：超了 Gmail 会静默拒收，而地址在库里一切正常，
+	// 所以这里必须报错，不能让使用者拿到一个永远收不到信的地址。
+	if length := len(local) + 1 + len(tag); length > MaxPlusAliasLocalPart {
+		return "", errCode("google_alias_too_long", fmt.Sprintf(
+			"地址过长：@ 之前最多 %d 个字符，「%s+%s」是 %d 个，请缩短 + 标签（此主地址最多可容纳 %d 个字符的标签）",
+			MaxPlusAliasLocalPart, local, tag, length, MaxPlusAliasLocalPart-len(local)-1), false)
 	}
 	return local + "+" + tag + "@" + domain, nil
 }

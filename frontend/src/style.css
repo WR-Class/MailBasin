@@ -1335,6 +1335,24 @@ textarea.field {
   gap: 10px;
 }
 
+/* 输入框 + 按钮并排，用于「前缀 + 随机」这种组合。 */
+.apple-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.apple-inline-field > .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.apple-inline-field > .secondary-button {
+  flex: 0 0 auto;
+  height: 34px;
+  white-space: nowrap;
+}
+
 .apple-auth-field {
   position: relative;
   display: block;

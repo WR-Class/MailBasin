@@ -158,6 +158,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/google-accounts/{id}/aliases", s.protected(s.handleGoogleAliases))
 	s.mux.HandleFunc("POST /api/google-accounts/{id}/aliases/import", s.protected(s.handleGoogleAliasImport))
 	s.mux.HandleFunc("POST /api/google-accounts/{id}/aliases/generate", s.protected(s.handleGoogleAliasGenerate))
+	s.mux.HandleFunc("POST /api/google-accounts/{id}/aliases/generate-batch", s.protected(s.handleGoogleAliasBatch))
 	s.mux.HandleFunc("POST /api/google-accounts/{id}/mailboxes", s.protected(s.handleGoogleMailboxCreate))
 	// 回调端点刻意不套 protected：请求来自 Google 的 302，带的是 state 而不是会话 cookie。
 	// 安全性由 state 保证——只有本次发起授权时生成的那个 state 才对得上内存里的流程记录。

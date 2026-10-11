@@ -416,7 +416,94 @@ func TestSplitMailAddressesHandlesNamesAndSeparators(t *testing.T) {
 
 // 免费 Gmail 没有可枚举的附加地址，所以这里必须老老实实只回主地址，
 // 而不是编造一堆 + 标签让界面看起来"发现了很多别名"。
+// RFC 5321 规定 @ 之前的本地部分最多 64 个字符。超了 Gmail 会静默拒收，
+// 而地址在库里看起来一切正常——所以必须在构造时就报错。
+func TestBuildPlusAliasEnforcesLocalPartLimit(t *testing.T) {
+	const base = "user@gmail.com" // 本地部分 4 个字符，最多容纳 59 个字符的标签
+	if got := MaxPlusTagLength(base); got != 59 {
+		t.Fatalf("MaxPlusTagLength 计算错误：got=%d want=59", got)
+	}
+	// 正好到上限：本地部分 4 + "+" + 59 = 64，必须通过。
+	atLimit := strings.Repeat("a", 59)
+	email, err := BuildPlusAlias(base, atLimit)
+	if err != nil {
+		t.Fatalf("正好到 64 个字符时不应报错：%v", err)
+	}
+	if local := email[:strings.Index(email, "@")]; len(local) != 64 {
+		t.Fatalf("边界地址的本地部分应为 64，实际 %d：%s", len(local), email)
+	}
+	// 超一个字符：65，必须报错而不是静默通过。
+	if _, err := BuildPlusAlias(base, strings.Repeat("a", 60)); err == nil {
+		t.Fatal("超过 64 个字符时必须报错，否则会生成一个永远收不到信的地址")
+	} else if ErrorDetailsCode(err) != "google_alias_too_long" {
+		t.Fatalf("错误码不正确：%v", err)
+	}
+}
+
+// 随机标签用的字符集不能含 i、l、o、0、1：这几个在抄写地址时最容易看错。
+func TestPlusTagAlphabetExcludesConfusableCharacters(t *testing.T) {
+	for _, bad := range []string{"i", "l", "o", "0", "1"} {
+		if strings.Contains(plusTagAlphabet, bad) {
+			t.Fatalf("字符集不应包含易混淆字符 %q：%s", bad, plusTagAlphabet)
+		}
+	}
+	if len(plusTagAlphabet) < 30 {
+		t.Fatalf("字符集太小，碰撞概率会明显上升：%d 个字符", len(plusTagAlphabet))
+	}
+}
+
+func TestRandomPlusTagRespectsPrefixAndLength(t *testing.T) {
+	tag, err := RandomPlusTag("Shop", 8)
+	if err != nil {
+		t.Fatalf("生成随机标签失败：%v", err)
+	}
+	if !strings.HasPrefix(tag, "shop-") {
+		t.Fatalf("前缀应统一转小写并用 - 连接：%q", tag)
+	}
+	if len(tag) != len("shop-")+8 {
+		t.Fatalf("标签长度不正确：%q", tag)
+	}
+	for _, char := range strings.TrimPrefix(tag, "shop-") {
+		if !strings.ContainsRune(plusTagAlphabet, char) {
+			t.Fatalf("标签含字符集之外的字符 %q：%q", char, tag)
+		}
+	}
+	// 不带前缀时是纯随机串。
+	plain, err := RandomPlusTag("", 8)
+	if err != nil {
+		t.Fatalf("生成随机标签失败：%v", err)
+	}
+	if len(plain) != 8 || strings.Contains(plain, "-") {
+		t.Fatalf("无前缀时不应出现分隔符：%q", plain)
+	}
+}
+
+// 两次生成不应相同——否则批量创建会一直在同一个地址上打转。
+func TestRandomPlusTagDoesNotRepeat(t *testing.T) {
+	seen := map[string]struct{}{}
+	for index := 0; index < 200; index++ {
+		tag, err := RandomPlusTag("", 8)
+		if err != nil {
+			t.Fatalf("生成随机标签失败：%v", err)
+		}
+		if _, ok := seen[tag]; ok {
+			t.Fatalf("200 次生成出现重复：%q", tag)
+		}
+		seen[tag] = struct{}{}
+	}
+}
+
+func TestMaxPlusTagLengthHandlesInvalidInput(t *testing.T) {
+	if got := MaxPlusTagLength("没有 at 符号"); got != 0 {
+		t.Fatalf("非法地址应返回 0：%d", got)
+	}
+	if got := MaxPlusTagLength("user+old@gmail.com"); got != 59 {
+		t.Fatalf("已有 + 标签时应先剥掉再计算：%d", got)
+	}
+}
+
 func TestListAliasesReturnsPrimaryAddressOnly(t *testing.T) {
+
 	client := newTestGmailClient(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"emailAddress": "user@gmail.com", "messagesTotal": 12})
 	})

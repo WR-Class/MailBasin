@@ -282,6 +282,27 @@ func (s *Server) handleGoogleAliasGenerate(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleGoogleAliasBatch 批量生成 + 标签地址。prefix 留空即纯随机；跨批次不会重复。
+func (s *Server) handleGoogleAliasBatch(w http.ResponseWriter, r *http.Request) {
+	accountID := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Prefix string `json:"prefix"`
+		Count  int    `json:"count"`
+		Label  string `json:"label"`
+		Note   string `json:"note"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := s.mailbox.CreateGoogleAliases(accountID, body.Prefix, body.Count, body.Label, body.Note)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
+}
+
 // handleGoogleMailboxCreate 手工添加一个完整地址，用于已有其他 Gmail 地址的场景。
 func (s *Server) handleGoogleMailboxCreate(w http.ResponseWriter, r *http.Request) {
 	accountID := strings.TrimSpace(r.PathValue("id"))

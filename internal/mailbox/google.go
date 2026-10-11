@@ -252,6 +252,118 @@ func (s *Service) CreateGoogleAlias(accountID, tag, label, note string) (domain.
 	}, firstNonEmpty(note, "Gmail + 标签地址，与主地址共用同一个收件箱"))
 }
 
+// GoogleAliasBatchResult 是一次批量生成的结果统计。
+type GoogleAliasBatchResult struct {
+	AccountID string   `json:"account_id"`
+	Requested int      `json:"requested"`
+	Created   int      `json:"created"`
+	Skipped   int      `json:"skipped"`
+	Prefix    string   `json:"prefix,omitempty"`
+	Addresses []string `json:"addresses,omitempty"`
+}
+
+const (
+	// GoogleAliasBatchMax 是单次批量生成的数量上限。
+	GoogleAliasBatchMax = 1000
+	// googleAliasBatchAttempts 是每个地址的最大重试次数；兜不住就如实记为 skipped。
+	googleAliasBatchAttempts = 20
+)
+
+// CreateGoogleAliases 批量生成 + 标签地址。
+//
+// 跨批次不会重复：生成前先把已有的全部地址读进一个集合，每个候选同时比对「已有地址」和
+// 「本批次已生成的地址」，所以这次建 100 个、下次建 1000 个都不会撞上。凑不够时如实返回 skipped。
+func (s *Service) CreateGoogleAliases(accountID, prefix string, count int, label, note string) (GoogleAliasBatchResult, error) {
+	accountID = strings.TrimSpace(accountID)
+	account, ok := s.store.FindAppleAccount(accountID)
+	if !ok {
+		return GoogleAliasBatchResult{}, errors.New("Google 账号不存在")
+	}
+	if account.ProviderOrDefault() != domain.ProviderGoogle {
+		return GoogleAliasBatchResult{}, errors.New("该账号不是 Google 账号")
+	}
+	session, ok := s.store.GoogleSessionByAccountID(accountID)
+	if !ok {
+		return GoogleAliasBatchResult{}, errors.New("对应 Google 账号登录态不存在，请先完成授权")
+	}
+	if count <= 0 {
+		return GoogleAliasBatchResult{}, errors.New("生成数量必须大于 0")
+	}
+	if count > GoogleAliasBatchMax {
+		return GoogleAliasBatchResult{}, fmt.Errorf("单次最多生成 %d 个地址，当前请求 %d 个", GoogleAliasBatchMax, count)
+	}
+	base := firstNonEmpty(session.Email, account.AppleID)
+	if _, err := protocol.BuildPlusAlias(base, "probe"); err != nil {
+		return GoogleAliasBatchResult{}, err
+	}
+	tagLimit := protocol.MaxPlusTagLength(base)
+	if tagLimit < 1 {
+		return GoogleAliasBatchResult{}, fmt.Errorf(
+			"主地址 %s 的本地部分已占满 %d 个字符，无法再生成 + 别名", base, protocol.MaxPlusAliasLocalPart)
+	}
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	randomLength := protocol.DefaultPlusTagLength
+	if prefix != "" {
+		// 前缀 + "-" + 随机串必须整体放得下，否则缩短随机部分而不是拒绝请求。
+		randomLength = tagLimit - len(prefix) - 1
+		if randomLength < 1 {
+			return GoogleAliasBatchResult{}, fmt.Errorf(
+				"前缀「%s」太长：这个主地址最多容纳 %d 个字符的标签，前缀已占 %d 个", prefix, tagLimit, len(prefix))
+		}
+	}
+	if randomLength > protocol.DefaultPlusTagLength {
+		randomLength = protocol.DefaultPlusTagLength
+	}
+	seen := map[string]struct{}{}
+	for _, mailbox := range s.store.AllMailboxes() {
+		seen[strings.ToLower(strings.TrimSpace(mailbox.Email))] = struct{}{}
+	}
+	result := GoogleAliasBatchResult{AccountID: accountID, Requested: count, Prefix: prefix}
+	for index := 0; index < count; index++ {
+		created := false
+		for attempt := 0; attempt < googleAliasBatchAttempts; attempt++ {
+			tag, err := protocol.RandomPlusTag(prefix, randomLength)
+			if err != nil {
+				return result, err
+			}
+			email, err := protocol.BuildPlusAlias(base, tag)
+			if err != nil {
+				return result, err
+			}
+			if _, exists := seen[email]; exists {
+				continue
+			}
+			_, wasCreated, err := s.store.UpsertMailboxFromRemote(accountID, domain.RemoteMailbox{
+				Provider: domain.ProviderGoogle,
+				Email:    email,
+				Label:    firstNonEmpty(strings.TrimSpace(label), email),
+				IsActive: true,
+				Origin:   "google_plus_alias",
+			}, firstNonEmpty(note, "Gmail + 标签地址，与主地址共用同一个收件箱"))
+			if err != nil {
+				return result, fmt.Errorf("生成地址 %s 失败：%w", email, err)
+			}
+			seen[email] = struct{}{}
+			if !wasCreated {
+				// 并发下被别人抢先建了同一个地址，换一个再来。
+				continue
+			}
+			result.Created++
+			result.Addresses = append(result.Addresses, email)
+			created = true
+			break
+		}
+		if !created {
+			result.Skipped++
+		}
+	}
+	if result.Created > 0 {
+		_ = s.store.RecordEvent("info", "google", fmt.Sprintf(
+			"Google + 地址批量生成完成：新增 %d 个，未能生成 %d 个", result.Created, result.Skipped))
+	}
+	return result, nil
+}
+
 // GoogleResolvedProxy 返回当前实际生效的代理地址，供界面显示诊断信息。
 // 使用者需要能区分「代理没配上」和「代理配了但连不上」。
 func (s *Service) GoogleResolvedProxy() string {
