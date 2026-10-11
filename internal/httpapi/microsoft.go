@@ -60,7 +60,7 @@ func (s *Server) microsoftStatus() microsoftModuleStatus {
 		UsingDefaultClient: usingDefault,
 		WatcherEnabled:     settings.EnableMicrosoftMailWatcher,
 		AccountCount:       len(s.store.MicrosoftAccounts()),
-		AliasLimitNote:     "Microsoft Graph 不提供创建别名的接口，别名需要在 account.microsoft.com 手工创建后再导入；单账号上限 10 个。",
+		AliasLimitNote:     "两条路可以扩展地址：①「批量生成」用 + 标签，不受数量限制，实测确认免费 Outlook.com 能收到；②真正的别名（独立地址）Graph 不提供创建接口，需要在 account.microsoft.com 手工创建后再导入，单账号上限 10 个。",
 	}
 }
 

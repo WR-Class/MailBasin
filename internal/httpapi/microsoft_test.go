@@ -113,9 +113,9 @@ func TestMicrosoftStatusReportsConfigAndDefaults(t *testing.T) {
 	if data["tenant"] != "common" {
 		t.Fatalf("tenant 默认值不正确：%v", data["tenant"])
 	}
-	// Graph 不提供创建别名的接口，这个限制必须如实暴露给前端。
-	if note, _ := data["alias_limit_note"].(string); !strings.Contains(note, "Graph") || !strings.Contains(note, "10") {
-		t.Fatalf("应说明别名创建限制：%q", note)
+	// 两条路都要说清楚：+ 标签不限数量，真正的别名才是 Graph 建不了、上限 10 个的那种。
+	if note, _ := data["alias_limit_note"].(string); !strings.Contains(note, "Graph") || !strings.Contains(note, "10") || !strings.Contains(note, "+") {
+		t.Fatalf("应同时说明 + 标签和真别名两条路：%q", note)
 	}
 }
 
