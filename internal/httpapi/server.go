@@ -896,7 +896,7 @@ func (s *Server) handleImportExternalMailboxes(w http.ResponseWriter, r *http.Re
 	}})
 }
 
-// handleIMAPPresets 返回 QQ / 163 / 自定义的服务器预设，供界面下拉框直接渲染。
+// handleIMAPPresets 返回 QQ / 163 / Gmail / 自定义的服务器预设，供界面下拉框直接渲染。
 // 预设放在服务端是为了让「地址是数据」这件事只有一处定义，前端不复制一份。
 func (s *Server) handleIMAPPresets(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{

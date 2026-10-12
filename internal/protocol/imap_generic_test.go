@@ -7,26 +7,48 @@ import (
 	"time"
 )
 
-// QQ 和 163 都必须在预设里，且地址正确。
-// 这两个地址是使用者要照着填的东西，写错等于功能不可用。
-func TestIMAPPresetsCoverQQAnd163(t *testing.T) {
+// 已知服务商都必须在预设里，且地址正确。
+// 这些地址是使用者要照着填的东西，写错等于功能不可用。
+func TestIMAPPresetsCoverKnownVendors(t *testing.T) {
 	byKey := make(map[string]IMAPPreset)
 	for _, preset := range IMAPPresets() {
 		byKey[preset.Key] = preset
 	}
-	qq, ok := byKey["qq"]
-	if !ok || qq.Host != "imap.qq.com" || qq.Port != 993 {
-		t.Fatalf("QQ 预设不正确：%+v", qq)
+	want := map[string]string{
+		"qq":    "imap.qq.com",
+		"163":   "imap.163.com",
+		"gmail": "imap.gmail.com",
 	}
-	mail163, ok := byKey["163"]
-	if !ok || mail163.Host != "imap.163.com" || mail163.Port != 993 {
-		t.Fatalf("163 预设不正确：%+v", mail163)
+	for key, host := range want {
+		preset, ok := byKey[key]
+		if !ok || preset.Host != host || preset.Port != 993 {
+			t.Fatalf("预设 %q 不正确：期望 %s:993，实际 %+v", key, host, preset)
+		}
 	}
 	// 每个预设都要给出「怎么拿授权码」，否则使用者只能去猜。
 	for _, preset := range IMAPPresets() {
 		if strings.TrimSpace(preset.Hint) == "" {
 			t.Fatalf("预设 %q 缺少获取授权码的说明", preset.Key)
 		}
+	}
+}
+
+// 自定义预设必须排在最后：IMAPPresetByKey 对认不出的 key 直接取列表最后一项回落。
+// 往中间插一个服务商，就会把「认不出」悄悄改判成那个服务商，拿着错误的服务器地址去连。
+func TestIMAPPresetFallbackStaysLast(t *testing.T) {
+	presets := IMAPPresets()
+	last := presets[len(presets)-1]
+	if last.Key != "custom" || last.Host != "" {
+		t.Fatalf("预设表最后一项必须是自定义预设，实际 %+v", last)
+	}
+}
+
+// Gmail 反过来：它是支持 + 标签的。这一点也要写在预设里，
+// 否则使用者会以为和 QQ、163 一样不能用加号地址，白白放弃最省事的办法。
+func TestIMAPPresetsStateGmailSupportsPlusTags(t *testing.T) {
+	preset := IMAPPresetByKey("gmail")
+	if !strings.Contains(preset.Limit, "+") {
+		t.Fatalf("Gmail 预设应说明支持 + 标签，实际：%q", preset.Limit)
 	}
 }
 
