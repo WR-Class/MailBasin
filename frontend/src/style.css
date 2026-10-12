@@ -1012,15 +1012,6 @@ textarea.field {
   overflow-wrap: anywhere;
 }
 
-.apple-alias-primary {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 11px;
-  background: rgba(56, 189, 248, 0.18);
-  white-space: nowrap;
-}
-
 /* Google 账号页顶部那段「应用授权信息」：和下面的账号列表拉开一点。 */
 .google-credentials {
   margin-bottom: 12px;

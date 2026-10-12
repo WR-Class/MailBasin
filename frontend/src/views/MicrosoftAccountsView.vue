@@ -286,9 +286,17 @@ function primaryAddress() {
   return String(selected.value?.email || selected.value?.apple_id || '').toLowerCase()
 }
 
+// 主地址那条池子记录由后端标成 microsoft_primary，比字符串比对可靠。
 function isPrimaryMailbox(mailbox) {
+  if (String(mailbox.remote_origin || '') === 'microsoft_primary') return true
   return String(mailbox.email || '').toLowerCase() === primaryAddress()
 }
+
+// 别名列表里不列主地址：点进来的这一行本身就是主地址，再列一遍是重复。
+// 但它在邮箱池里的那条记录不能跟着删——Graph 是按收件人字段（To/Cc）去池子里
+// 精确匹配的（protocol/graph_client.go 用池子记录建 byEmail），少了这条记录，
+// 寄到主地址的信会被算成「未匹配」直接丢掉。所以这里只是不显示，不动数据。
+const aliasMailboxes = computed(() => poolMailboxes.value.filter((mailbox) => !isPrimaryMailbox(mailbox)))
 
 // 删除别名＝把这条记录从本机邮箱池里拿掉，连同它收到的邮件。
 // Graph 没有删除别名的接口，微软账号上的地址本身删不掉——所以确认框里
@@ -639,7 +647,7 @@ onBeforeUnmount(() => {
                             <ChevronRight :size="15" class="detail-section-caret" />
                             <span class="detail-section-title">
                               <strong><MailOpen :size="15" />别名邮箱</strong>
-                              <small>{{ poolMailboxes.length }} 个地址在邮箱池里 · Graph 不提供创建接口，请到 account.microsoft.com 手工创建后再导入</small>
+                              <small>{{ aliasMailboxes.length }} 个别名在邮箱池里 · Graph 不提供创建接口，请到 account.microsoft.com 手工创建后再导入</small>
                             </span>
                           </button>
                           <div class="detail-section-actions">
@@ -647,12 +655,11 @@ onBeforeUnmount(() => {
                           </div>
                         </header>
                         <div v-if="openSections.aliases" class="detail-section-body">
-                          <div v-if="!poolMailboxes.length" class="apple-state-empty">这个账号还没有地址进邮箱池，点页面上的“发现别名”或“手工添加”。</div>
+                          <div v-if="!aliasMailboxes.length" class="apple-state-empty">这个账号还没有别名进邮箱池，点页面上的“发现别名”或“手工添加”。</div>
                           <ul v-else class="apple-alias-list">
-                            <li v-for="mailbox in poolMailboxes" :key="mailbox.id" class="apple-alias-row">
+                            <li v-for="mailbox in aliasMailboxes" :key="mailbox.id" class="apple-alias-row">
                               <MailOpen :size="13" />
                               <span class="font-mono">{{ mailbox.email }}</span>
-                              <span v-if="isPrimaryMailbox(mailbox)" class="apple-alias-primary">主地址</span>
                               <button type="button" class="apple-delete-button" :title="`删除 ${mailbox.email}`" :aria-label="`删除 ${mailbox.email}`" :disabled="isBusy(`alias-delete:${mailbox.id}`)" @click="deleteAlias(mailbox)"><LoaderCircle v-if="isBusy(`alias-delete:${mailbox.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button>
                             </li>
                           </ul>
