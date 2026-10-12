@@ -6,6 +6,7 @@ import CardSelect from '../components/CardSelect.vue'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
+import AccountInboxPanel from '../components/AccountInboxPanel.vue'
 
 const loading = ref(true)
 const busyActions = ref([])
@@ -369,6 +370,7 @@ onBeforeUnmount(() => {
               <div v-if="!selected.login_states?.length" class="apple-state-empty">该账号还没有已保存的登录态</div>
             </div>
           </template>
+          <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
         </aside>
       </div>
     </section>

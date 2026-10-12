@@ -176,6 +176,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/imap-accounts/{id}", s.protected(s.handleIMAPAccountDelete))
 	s.mux.HandleFunc("POST /api/imap-accounts/{id}/sync", s.protected(s.handleIMAPAccountSync))
 	s.mux.HandleFunc("POST /api/imap-accounts/{id}/addresses", s.protected(s.handleIMAPAccountAddresses))
+	// 母号收件箱：五种服务商共用同一个端点，因为要返回的结构完全相同。
+	s.mux.HandleFunc("GET /api/accounts/{id}/inbox", s.protected(s.handleAccountInbox))
 	s.mux.HandleFunc("GET /api/mailboxes/sync-messages/status", s.protected(s.handleExistingMailboxMessagesSyncStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/sync-messages", s.protected(s.handleExistingMailboxMessagesSync))
 	s.mux.HandleFunc("POST /api/mailboxes/remote-clean", s.protected(s.handleMailboxesRemoteClean))

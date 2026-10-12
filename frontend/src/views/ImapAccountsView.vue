@@ -6,12 +6,15 @@ import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
+import AccountInboxPanel from '../components/AccountInboxPanel.vue'
 
 // QQ 和 163 共用这一个组件，靠路由上的 preset 分开。
 // 两者协议完全相同，只是服务器地址不同，所以复制一份页面没有意义。
 const route = useRoute()
 const preset = computed(() => String(route.meta.preset || 'qq'))
 const presetName = computed(() => String(route.meta.presetName || 'IMAP 邮箱'))
+// 按钮上不带空格：使用者说的是「添加QQ邮箱」，不是「添加 QQ 邮箱」。
+const presetLabel = computed(() => String(route.meta.presetLabel || presetName.value))
 
 const loading = ref(true)
 const busyActions = ref([])
@@ -123,7 +126,7 @@ function openAddAddressDialog() {
 
 async function createAccount() {
   if (!createForm.email.trim()) {
-    flash('请填写母号邮箱地址', true)
+    flash('请填写邮箱地址', true)
     return
   }
   if (!createForm.secret.trim()) {
@@ -150,7 +153,7 @@ async function createAccount() {
     const parts = [`新增 ${result.created || 0} 个地址`, `更新 ${result.updated || 0} 个`]
     if (result.failed) parts.push(`失败 ${result.failed} 个`)
     if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 条`)
-    flash(`母号已添加：${parts.join('，')}`, Boolean(result.failed))
+    flash(`${presetLabel.value}已添加：${parts.join('，')}`, Boolean(result.failed))
     showCreate.value = false
     await load()
     if (payload.account) selected.value = accounts.value.find((item) => item.id === payload.account.id) || payload.account
@@ -221,7 +224,7 @@ async function togglePool(mailbox) {
 async function deleteAccount(account) {
   const name = account.label || account.apple_id
   const ok = await confirmAction({
-    title: '删除 IMAP 母号',
+    title: `删除 ${presetLabel.value}`,
     message: `将删除 ${name} 及其名下 ${account.mailbox_count || 0} 个地址和已收邮件，且不可恢复。`,
     confirmText: '删除',
   })
@@ -260,10 +263,10 @@ onBeforeUnmount(() => {
   <div class="apple-account-page">
     <section class="panel apple-account-workbench">
       <header class="apple-command-bar">
-        <div class="apple-command-title"><span><MailOpen :size="16" /></span><div><h2>{{ presetName }}</h2><p>母号用标准 IMAP + 客户端授权码收信，名下地址默认只在母号页面</p></div></div>
+        <div class="apple-command-title"><span><MailOpen :size="16" /></span><div><h2>{{ presetName }}</h2><p>用标准 IMAP + 客户端授权码收信，名下地址默认只在本页</p></div></div>
         <div class="apple-command-actions">
-          <button class="primary-button apple-command-button" title="添加一个母号，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加母号</button>
-          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该母号名下所有地址的收件箱' : '请先选择一个母号'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此母号</button>
+          <button class="primary-button apple-command-button" title="添加一个邮箱，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加{{ presetLabel }}</button>
+          <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该邮箱名下所有地址的收件箱' : '请先选择一个邮箱'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此邮箱</button>
         </div>
       </header>
 
@@ -272,15 +275,15 @@ onBeforeUnmount(() => {
         <span>{{ moduleInfo.limit }}</span>
       </div>
 
-      <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载母号</div>
+      <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载{{ presetLabel }}</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>母号</h3><p>选择母号后可在右侧查看它名下的地址</p></div><span>{{ accounts.length }} 个母号</span></header>
-          <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 {{ presetName }} 母号</strong><small>点击“添加母号”，填入邮箱地址和客户端授权码。</small></div>
+          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后可在右侧查看它名下的地址</p></div><span>{{ accounts.length }} 个</span></header>
+          <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 {{ presetLabel }}</strong><small>点击“添加{{ presetLabel }}”，填入邮箱地址和客户端授权码。</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
-              <thead><tr><th>母号</th><th>状态</th><th>地址</th><th>操作</th></tr></thead>
+              <thead><tr><th>邮箱</th><th>状态</th><th>地址</th><th>操作</th></tr></thead>
               <tbody>
                 <tr v-for="account in accounts" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id} 的地址`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
                   <td><button type="button" class="apple-account-select" @click.stop="selectAccount(account)"><span class="apple-account-icon"><MailOpen :size="14" /></span><span><strong>{{ account.label || account.apple_id }}</strong><small>{{ account.apple_id }}</small></span></button></td>
@@ -294,9 +297,9 @@ onBeforeUnmount(() => {
         </section>
 
         <aside class="apple-detail-panel">
-          <div v-if="!selected" class="apple-detail-empty"><span><MailOpen :size="20" /></span><strong>选择一个母号</strong><small>它的服务器信息与名下地址会显示在这里。</small></div>
+          <div v-if="!selected" class="apple-detail-empty"><span><MailOpen :size="20" /></span><strong>选择一个邮箱</strong><small>它的服务器信息与名下地址会显示在这里。</small></div>
           <template v-else>
-            <header class="apple-detail-heading"><div><span>所选母号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy(`sync:${selected.id}`)" @click="syncAccount()"><LoaderCircle v-if="isBusy(`sync:${selected.id}`)" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy(`sync:${selected.id}`) ? '同步中' : '立即同步' }}</button></header>
+            <header class="apple-detail-heading"><div><span>所选邮箱</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy(`sync:${selected.id}`)" @click="syncAccount()"><LoaderCircle v-if="isBusy(`sync:${selected.id}`)" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy(`sync:${selected.id}`) ? '同步中' : '立即同步' }}</button></header>
             <div class="ms-detail-scroll">
             <div class="apple-state-list">
               <article class="apple-state-row">
@@ -313,7 +316,7 @@ onBeforeUnmount(() => {
 
             <div class="apple-detail-block">
               <header class="apple-section-heading"><div><h3>名下地址</h3><p>默认不进邮箱池，需要时逐个勾选；勾选后邮箱池里就能看到</p></div><button class="secondary-button apple-check-button" @click="openAddAddressDialog"><Plus :size="13" />添加地址</button></header>
-              <div v-if="!selected.mailboxes?.length" class="apple-state-empty">这个母号下还没有地址。</div>
+              <div v-if="!selected.mailboxes?.length" class="apple-state-empty">这个邮箱下还没有地址。</div>
               <ul v-else class="apple-alias-list">
                 <li v-for="mailbox in selected.mailboxes" :key="mailbox.id">
                   <MailOpen :size="13" />
@@ -337,6 +340,7 @@ onBeforeUnmount(() => {
               </dl>
               <p v-if="moduleInfo.hint" class="apple-detail-hint"><AlertCircle :size="13" />{{ moduleInfo.hint }}</p>
             </div>
+            <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
             </div>
           </template>
         </aside>
@@ -345,37 +349,37 @@ onBeforeUnmount(() => {
 
     <div v-if="showCreate" class="mailbox-dialog-backdrop" role="presentation" @click.self="showCreate = false">
       <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="imap-create-title" @submit.prevent="createAccount">
-        <header class="mailbox-dialog-heading"><div><h2 id="imap-create-title"><Plus :size="18" />添加 {{ presetName }} 母号</h2><p>母号自己就是收信的那个邮箱，它的地址会被自动一起导入。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('create')" @click="showCreate = false"><X :size="16" /></button></header>
+        <header class="mailbox-dialog-heading"><div><h2 id="imap-create-title"><Plus :size="18" />添加{{ presetLabel }}</h2><p>这里填的就是收信的那个邮箱，它的地址会被自动一起导入。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('create')" @click="showCreate = false"><X :size="16" /></button></header>
         <div class="mailbox-dialog-grid">
-          <label class="form-group"><span class="form-label">母号邮箱地址</span><input v-model.trim="createForm.email" class="field font-mono" :placeholder="preset === '163' ? 'someone@163.com' : '12345@qq.com'" /></label>
+          <label class="form-group"><span class="form-label">邮箱地址</span><input v-model.trim="createForm.email" class="field font-mono" :placeholder="preset === '163' ? 'someone@163.com' : '12345@qq.com'" /></label>
           <label class="form-group"><span class="form-label">客户端授权码</span><input v-model.trim="createForm.secret" class="field font-mono" type="password" placeholder="不是邮箱登录密码" /></label>
           <label class="form-group"><span class="form-label">IMAP 服务器</span><input v-model.trim="createForm.host" class="field" :placeholder="moduleInfo.host || 'imap.example.com'" /></label>
           <label class="form-group"><span class="form-label">端口</span><input v-model.number="createForm.port" class="field" type="number" :placeholder="String(moduleInfo.port || 993)" /></label>
-          <label class="form-group"><span class="form-label">账号名</span><input v-model.trim="createForm.username" class="field" placeholder="留空则用母号地址本身" /></label>
+          <label class="form-group"><span class="form-label">账号名</span><input v-model.trim="createForm.username" class="field" placeholder="留空则用邮箱地址本身" /></label>
           <label class="form-group"><span class="form-label">标签</span><input v-model.trim="createForm.label" class="field" placeholder="留空则用邮箱地址" /></label>
           <label class="form-group mailbox-dialog-wide"><span class="form-label">备注</span><input v-model.trim="createForm.note" class="field" placeholder="可选" /></label>
           <div class="form-group mailbox-dialog-wide">
             <span class="form-label">名下其它地址（可选，一行一个）</span>
-            <textarea v-model="createForm.raw" class="field font-mono" rows="4" placeholder="别名地址，留空就只导入母号自己"></textarea>
+            <textarea v-model="createForm.raw" class="field font-mono" rows="4" placeholder="别名地址，留空就只导入这一个地址"></textarea>
           </div>
         </div>
         <p v-if="moduleInfo.hint" class="apple-dialog-intro"><strong>怎么拿授权码：</strong>{{ moduleInfo.hint }}</p>
         <p v-if="moduleInfo.limit" class="apple-dialog-intro"><strong>能挂多少地址：</strong>{{ moduleInfo.limit }}</p>
-        <p class="apple-dialog-intro">已解析出 <strong>{{ createPreviewCount }}</strong> 条附加地址（母号自己那一条由服务端补上，不占这个数）。授权码等同于邮箱密码，保存时会加密。导入时会先探活一次并如实报告结果。</p>
-        <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('create')" @click="showCreate = false">取消</button><button class="primary-button" :disabled="isBusy('create') || !createForm.email.trim() || !createForm.secret.trim()"><LoaderCircle v-if="isBusy('create')" :size="15" class="animate-spin" /><Plus v-else :size="15" />添加母号</button></footer>
+        <p class="apple-dialog-intro">已解析出 <strong>{{ createPreviewCount }}</strong> 条附加地址（邮箱自己那一条由服务端补上，不占这个数）。授权码等同于邮箱密码，保存时会加密。导入时会先探活一次并如实报告结果。</p>
+        <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('create')" @click="showCreate = false">取消</button><button class="primary-button" :disabled="isBusy('create') || !createForm.email.trim() || !createForm.secret.trim()"><LoaderCircle v-if="isBusy('create')" :size="15" class="animate-spin" /><Plus v-else :size="15" />添加{{ presetLabel }}</button></footer>
       </form>
     </div>
 
     <div v-if="showAddAddress" class="mailbox-dialog-backdrop" role="presentation" @click.self="showAddAddress = false">
       <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="imap-address-title" @submit.prevent="addAddresses">
-        <header class="mailbox-dialog-heading"><div><h2 id="imap-address-title"><Plus :size="18" />给 {{ selected?.label || selected?.apple_id }} 添加地址</h2><p>沿用这个母号已保存的授权码，不用再填一次。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('add-address')" @click="showAddAddress = false"><X :size="16" /></button></header>
+        <header class="mailbox-dialog-heading"><div><h2 id="imap-address-title"><Plus :size="18" />给 {{ selected?.label || selected?.apple_id }} 添加地址</h2><p>沿用这个邮箱已保存的授权码，不用再填一次。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('add-address')" @click="showAddAddress = false"><X :size="16" /></button></header>
         <div class="mailbox-dialog-grid">
           <div class="form-group mailbox-dialog-wide">
             <span class="form-label">邮箱地址（一行一个）</span>
             <textarea v-model="addressForm.raw" class="field font-mono" rows="6" :placeholder="activeHost ? `别名地址，例如 ${preset === '163' ? 'someone@163.com' : '12345@qq.com'}` : '别名地址'"></textarea>
           </div>
         </div>
-        <p class="apple-dialog-intro">已解析出 <strong>{{ addressPreviewCount }}</strong> 条。新地址默认不进邮箱池，只在这个母号页面可见；要放进池子，在上面的地址列表里点「进池」。</p>
+        <p class="apple-dialog-intro">已解析出 <strong>{{ addressPreviewCount }}</strong> 条。新地址默认不进邮箱池，只在本页可见；要放进池子，在上面的地址列表里点「进池」。</p>
         <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('add-address')" @click="showAddAddress = false">取消</button><button class="primary-button" :disabled="isBusy('add-address') || !addressPreviewCount"><LoaderCircle v-if="isBusy('add-address')" :size="15" class="animate-spin" /><Plus v-else :size="15" />添加 {{ addressPreviewCount }} 个地址</button></footer>
       </form>
     </div>
