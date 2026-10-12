@@ -559,8 +559,10 @@ func TestResolveProxyPrefersExplicitThenEnv(t *testing.T) {
 	if got := ResolveProxy(""); got != "http://env:5678" {
 		t.Fatalf("环境变量应作为第二优先：%q", got)
 	}
-	// 环境变量全部清空时会落到系统代理；系统代理是否配置取决于机器，
-	// 所以这里只断言"不会 panic 且返回值可读"，不对具体值做断言。
+	// 环境变量全部清空后会落到系统代理，而系统代理是否配置取决于这台机器。
+	// 原来的写法在这里断言 ProxyDescription 非空，等于在断言「本机开着系统代理」：
+	// 系统代理一关（ProxyEnable=0）这条必然失败，而它测的不是代码行为。
+	// 改成用环境变量把「有代理」这个前提钉死，断言解析逻辑而不是机器设置。
 	t.Setenv("HTTPS_PROXY", "")
 	t.Setenv("https_proxy", "")
 	t.Setenv("HTTP_PROXY", "")
@@ -568,8 +570,9 @@ func TestResolveProxyPrefersExplicitThenEnv(t *testing.T) {
 	if got := ResolveProxy(""); strings.Contains(got, "env") {
 		t.Fatalf("环境变量已清空，不应再返回它：%q", got)
 	}
-	if got := ProxyDescription(""); got == "" {
-		t.Fatal("没有代理时也应给出可读说明")
+	t.Setenv("HTTPS_PROXY", "http://env:5678")
+	if got := ProxyDescription(""); got != "http://env:5678" {
+		t.Fatalf("有代理时说明应原样给出：%q", got)
 	}
 }
 
@@ -577,8 +580,10 @@ func TestProxyDescriptionIsHumanReadable(t *testing.T) {
 	if got := ProxyDescription("http://127.0.0.1:7897"); got != "http://127.0.0.1:7897" {
 		t.Fatalf("应原样回显：%q", got)
 	}
-	if got := ProxyDescription(""); got == "" {
-		t.Fatal("没有代理时也应给出可读说明，而不是空串")
+	// 同理：不依赖本机系统代理是否开启，用环境变量把「有代理」这个前提钉死。
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+	if got := ProxyDescription(""); got != "http://127.0.0.1:7897" {
+		t.Fatalf("有代理时应说明出来：%q", got)
 	}
 }
 
