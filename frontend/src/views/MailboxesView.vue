@@ -663,8 +663,12 @@ function extractExternalPairs(raw) {
       }
     }
     if (!email) {
-      email = (text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [''])[0]
+      // 先把链接整段摘掉再取邮箱，和后端 splitExternalPair 是同一套规则。
+      // 否则「邮箱和链接直接粘在一起」的形状（a@b.comhttps://...）里，邮箱正则的
+      // 顶级域会把 https 一起吞掉，预览会把它当成一条有效地址。
       url = (text.match(/https?:\/\/[^\s)\]|<>"']+/) || [''])[0]
+      const withoutURL = url ? text.replace(url, ' ') : text
+      email = (withoutURL.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [''])[0]
     }
     if (!email || !url) continue
     const key = email.toLowerCase()

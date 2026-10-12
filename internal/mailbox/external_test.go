@@ -197,6 +197,86 @@ func TestParseExternalMailboxLinesCountsSkippedLines(t *testing.T) {
 	}
 }
 
+// 回归测试：邮箱和链接直接粘在一起，既没有 ---- 也没有空格。
+//
+// 修之前这里会产出 "labels_rubies.7t@icloud.comhttps"：邮箱正则的顶级域部分
+// `\.[A-Za-z]{2,}` 不会在 `com` 处停下——`comhttps` 全是字母，它一口气吞下去。
+// 更糟的是跳过计数是 0，坏地址被静默存进库里，没人看得出来。
+func TestParseExternalMailboxLinesHandlesAddressGluedToURL(t *testing.T) {
+	const want = "labels_rubies.7t@icloud.com"
+	const url = "https://ic-mail.example.com/api/v1/access/AAA/mailboxes/labels_rubies.7t@icloud.com/code"
+	items, skipped := ParseExternalMailboxLines(want + url)
+	if len(items) != 1 {
+		t.Fatalf("应解析出 1 条，实际 %d（跳过 %d）", len(items), skipped)
+	}
+	if items[0].Email != want {
+		t.Fatalf("邮箱被链接污染了：应为 %q，实际 %q", want, items[0].Email)
+	}
+	if strings.HasSuffix(items[0].Email, "https") {
+		t.Fatalf("邮箱尾巴上挂着链接的开头：%q", items[0].Email)
+	}
+	if items[0].CodeAPIURL != url {
+		t.Fatalf("取码地址不正确：%q", items[0].CodeAPIURL)
+	}
+	if skipped != 0 {
+		t.Fatalf("这一行是能解析的，不该计入跳过，实际 %d", skipped)
+	}
+}
+
+// 带连字符和下划线的地址最容易在粘连形状上踩到，单独钉一条。
+func TestParseExternalMailboxLinesHandlesHyphenatedAddressGluedToURL(t *testing.T) {
+	const want = "gorge-layman.0i@icloud.com"
+	const url = "https://host/access/BBB/mailboxes/gorge-layman.0i@icloud.com/code"
+	items, skipped := ParseExternalMailboxLines(want + url)
+	if len(items) != 1 || skipped != 0 {
+		t.Fatalf("应解析出 1 条且不跳过，实际 %d 条 / 跳过 %d", len(items), skipped)
+	}
+	if items[0].Email != want {
+		t.Fatalf("邮箱不正确：应为 %q，实际 %q", want, items[0].Email)
+	}
+}
+
+// 四种真实输入形状必须给出同一个邮箱。只测修好的那一种不算验证——
+// 修一个形状而弄坏另一个，是这类改动最常见的失败方式。
+func TestParseExternalMailboxLinesAllRealShapesAgreeOnTheAddress(t *testing.T) {
+	const want = "labels_rubies.7t@icloud.com"
+	const url = "https://ic-mail.example.com/api/v1/access/AAA/mailboxes/labels_rubies.7t@icloud.com/code"
+	shapes := map[string]string{
+		"分隔符":      want + "----" + url,
+		"空格":       want + " " + url,
+		"粘连":       want + url,
+		"Markdown": "| " + want + " | " + url + " |",
+	}
+	for name, raw := range shapes {
+		items, skipped := ParseExternalMailboxLines(raw)
+		if len(items) != 1 {
+			t.Fatalf("%s：应解析出 1 条，实际 %d（跳过 %d）", name, len(items), skipped)
+		}
+		if items[0].Email != want {
+			t.Fatalf("%s：邮箱应为 %q，实际 %q", name, want, items[0].Email)
+		}
+	}
+}
+
+// 真的解析不出来的行必须计入跳过数，不能静默产出一个看着像但实际错的字段。
+func TestParseExternalMailboxLinesNeverSilentlyAcceptsJunk(t *testing.T) {
+	raw := "这是一行完全无关的文字，既没有地址也没有链接\n" +
+		"只有链接没有邮箱 https://host/code\n" +
+		"完整一条 ok@icloud.com https://host/access/T/mailboxes/ok@icloud.com/code\n"
+	items, skipped := ParseExternalMailboxLines(raw)
+	if len(items) != 1 {
+		t.Fatalf("应只解析出 1 条，实际 %d", len(items))
+	}
+	if skipped != 2 {
+		t.Fatalf("两行坏输入都应被计数，实际跳过 %d", skipped)
+	}
+	for _, item := range items {
+		if strings.Contains(item.Email, "https") {
+			t.Fatalf("坏字段被静默接受了：%q", item.Email)
+		}
+	}
+}
+
 // 新服务商必须能穿过归一化，否则会被悄悄当成 iCloud 去走 Apple 登录。
 func TestExternalProviderSurvivesNormalization(t *testing.T) {
 	if got := domain.NormalizeProvider("external"); got != domain.ProviderExternal {

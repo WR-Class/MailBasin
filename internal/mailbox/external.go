@@ -373,9 +373,20 @@ func splitExternalPair(candidate string) (string, string, bool) {
 		}
 		return strings.ToLower(email), endpoint, true
 	}
-	emailMatch := externalEmailPattern.FindStringSubmatch(candidate)
 	urlMatch := externalURLPattern.FindString(candidate)
-	if len(emailMatch) < 2 || urlMatch == "" {
+	if urlMatch == "" {
+		return "", "", false
+	}
+	// 先把链接整段从候选文本里摘掉，再从剩下的部分取邮箱。
+	//
+	// 不这么做的话，「邮箱和链接直接粘在一起」的形状（`a@b.comhttps://...`，
+	// 没有 ---- 也没有空格）会产出坏地址：邮箱正则的顶级域部分
+	// `\.[A-Za-z]{2,}` 不会在 `com` 处停下，因为后面跟的是 `https`——整个
+	// `comhttps` 全是字母，它一口气吞下去，于是得到 `a@b.comhttps`。
+	// 更糟的是跳过计数是 0：坏地址被静默存进库里，没人看得出来。
+	emailSource := strings.Replace(candidate, urlMatch, " ", 1)
+	emailMatch := externalEmailPattern.FindStringSubmatch(emailSource)
+	if len(emailMatch) < 2 {
 		return "", "", false
 	}
 	return strings.ToLower(emailMatch[1]), strings.TrimSpace(urlMatch), true
