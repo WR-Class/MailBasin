@@ -168,6 +168,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/mailboxes", s.protected(s.handleImportMailbox))
 	s.mux.HandleFunc("POST /api/mailboxes/resolve", s.protected(s.handleMailboxResolve))
 	s.mux.HandleFunc("POST /api/mailboxes/import-external", s.protected(s.handleImportExternalMailboxes))
+	s.mux.HandleFunc("GET /api/mailboxes/imap-presets", s.protected(s.handleIMAPPresets))
+	s.mux.HandleFunc("POST /api/mailboxes/import-imap", s.protected(s.handleImportIMAPMailboxes))
 	s.mux.HandleFunc("GET /api/mailboxes/sync-messages/status", s.protected(s.handleExistingMailboxMessagesSyncStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/sync-messages", s.protected(s.handleExistingMailboxMessagesSync))
 	s.mux.HandleFunc("POST /api/mailboxes/remote-clean", s.protected(s.handleMailboxesRemoteClean))
@@ -872,6 +874,53 @@ func (s *Server) handleImportExternalMailboxes(w http.ResponseWriter, r *http.Re
 		return
 	}
 	result, err := s.mailbox.ImportExternalMailboxes(items)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+		"result": result, "skipped_lines": skipped,
+	}})
+}
+
+// handleIMAPPresets 返回 QQ / 163 / 自定义的服务器预设，供界面下拉框直接渲染。
+// 预设放在服务端是为了让「地址是数据」这件事只有一处定义，前端不复制一份。
+func (s *Server) handleIMAPPresets(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+		"presets": protocol.IMAPPresets(),
+	}})
+}
+
+// handleImportIMAPMailboxes 导入走标准 IMAP + 客户端授权码收信的邮箱（QQ、163、自建）。
+//
+// 一组凭据对整批地址生效：一个 QQ 邮箱的所有别名共用同一个授权码，
+// 让使用者为每个别名重复粘贴授权码没有意义。
+func (s *Server) handleImportIMAPMailboxes(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Preset   string                            `json:"preset"`
+		Host     string                            `json:"host"`
+		Port     int                               `json:"port"`
+		Username string                            `json:"username"`
+		Secret   string                            `json:"secret"`
+		Raw      string                            `json:"raw"`
+		Items    []mailboxservice.IMAPMailboxInput `json:"items"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	items := body.Items
+	skipped := 0
+	if strings.TrimSpace(body.Raw) != "" {
+		parsed, dropped := mailboxservice.ParseIMAPMailboxLines(body.Raw)
+		items = append(items, parsed...)
+		skipped += dropped
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusBadRequest, "no_items", "没有解析出任何邮箱地址，请检查粘贴内容")
+		return
+	}
+	result, err := s.mailbox.ImportIMAPMailboxes(body.Preset, body.Host, body.Port, body.Username, body.Secret, items)
 	if err != nil {
 		writeServiceError(w, err)
 		return

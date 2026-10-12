@@ -16,6 +16,11 @@ const (
 	// ProviderExternal 表示没有母号、没有登录密码的裸邮箱：
 	// 只有一个第三方取码接口，靠那个 URL 里的令牌取信。
 	ProviderExternal = "external"
+	// ProviderIMAP 表示用标准 IMAP + 客户端授权码收信的邮箱（QQ、163、自建等）。
+	// 这类邮箱同样没有 OAuth 母号，凭主机、端口、账号和授权码直连收件箱；
+	// 之所以不按厂商各建一个 provider，是因为它们走的是同一条协议，
+	// 差异只在服务器地址，而地址是每个邮箱自己的字段。
+	ProviderIMAP = "imap"
 )
 
 const (
@@ -125,6 +130,8 @@ func NormalizeProvider(provider string) string {
 		return ProviderGoogle
 	case ProviderExternal:
 		return ProviderExternal
+	case ProviderIMAP:
+		return ProviderIMAP
 	}
 	return ProviderICloud
 }
@@ -144,7 +151,13 @@ type Mailbox struct {
 	ICloudActive   bool   `json:"icloud_active"`
 	// CodeAPIURL 是外部取码接口的完整地址，只对 ProviderExternal 有意义。
 	// 它内嵌了访问令牌，所以落库时必须和 api_token 一样加密。
-	CodeAPIURL        string    `json:"code_api_url,omitempty"`
+	CodeAPIURL string `json:"code_api_url,omitempty"`
+	// 以下四项是 IMAP 取码邮箱的连接信息，只对 ProviderIMAP 有意义。
+	// IMAPSecret 是客户端授权码（QQ / 163）或 App 专用密码，等同于密码，落库必须加密。
+	IMAPHost          string    `json:"imap_host,omitempty"`
+	IMAPPort          int       `json:"imap_port,omitempty"`
+	IMAPUsername      string    `json:"imap_username,omitempty"`
+	IMAPSecret        string    `json:"imap_secret,omitempty"`
 	ReceiveCount      int       `json:"receive_count"`
 	Status            string    `json:"status"`
 	Note              string    `json:"note"`
@@ -208,6 +221,11 @@ type RemoteMailbox struct {
 	Origin         string `json:"origin,omitempty"`
 	// CodeAPIURL 只在导入外部取码邮箱时给出，落库前会加密。
 	CodeAPIURL string `json:"code_api_url,omitempty"`
+	// IMAP 连接信息只在导入 IMAP 取码邮箱时给出，其中 IMAPSecret 落库前会加密。
+	IMAPHost     string `json:"imap_host,omitempty"`
+	IMAPPort     int    `json:"imap_port,omitempty"`
+	IMAPUsername string `json:"imap_username,omitempty"`
+	IMAPSecret   string `json:"imap_secret,omitempty"`
 }
 
 type Event struct {

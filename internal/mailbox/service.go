@@ -35,6 +35,9 @@ type Service struct {
 	messageSyncJobMu         sync.Mutex
 	messageSyncJob           ExistingMailboxMessageSyncJob
 	messageSyncJobGeneration uint64
+	// imapProbe 是 IMAP 凭据探活的实现。留空时用真实的 protocol.VerifyGenericIMAP。
+	// 做成可替换的字段，是为了让导入路径的单元测试不必真的去拨号 QQ 的服务器。
+	imapProbe func(ctx context.Context, host string, port int, username, secret string) error
 }
 
 type remoteMailboxDeleteClient interface {
@@ -878,6 +881,11 @@ func (s *Service) SyncMessages(ctx context.Context, mailboxID string) (int, erro
 	// 外部取码邮箱没有母号，走不了下面那条按账号分组的路径，单独分流。
 	if mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID)); ok && mailbox.ProviderOrDefault() == domain.ProviderExternal {
 		return s.SyncExternalMailbox(ctx, mailbox.ID)
+	}
+	// IMAP 取码邮箱（QQ / 163 / 自建）同样没有 OAuth 母号：
+	// 凭据就在邮箱自己身上，也不能进按账号分组的那条路径。
+	if mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID)); ok && mailbox.ProviderOrDefault() == domain.ProviderIMAP {
+		return s.SyncIMAPMailbox(ctx, mailbox.ID)
 	}
 	allowWebAPI := s.store.Settings().EnableWebCodeSync
 	result, err := s.syncMailboxMessagesWithOptions(ctx, mailboxID, MessageSyncOptions{

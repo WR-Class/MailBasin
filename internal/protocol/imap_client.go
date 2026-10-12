@@ -59,6 +59,12 @@ func dialICloudIMAPTLS(ctx context.Context, serverName string, port int) (net.Co
 	if port <= 0 {
 		port = defaultICloudIMAPPort
 	}
+	// 非 iCloud 主机（QQ、163、自建）走系统 DNS 和普通 TCP。
+	// iCloud 那套 DoT 解析器写死了境外的 1.1.1.1 / 8.8.8.8 并带 iCloud 专用 IP 兜底，
+	// 对国内邮箱来说是错的路，会在没有代理的网络里直接连不上。
+	if !IMAPHostIsICloud(serverName) {
+		return dialGenericIMAPTLS(ctx, serverName, port)
+	}
 	var lastErr error
 	if strings.EqualFold(strings.TrimSuffix(serverName, "."), defaultICloudIMAPHost) {
 		if conn, err := dialICloudIMAPTLSIPs(ctx, serverName, port, iCloudIMAPFallbackIPv4); err == nil {

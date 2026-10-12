@@ -114,6 +114,20 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		if strings.TrimSpace(remote.CodeAPIURL) != "" {
 			mailbox.CodeAPIURL = strings.TrimSpace(remote.CodeAPIURL)
 		}
+		// IMAP 连接信息同理：逐项按「明确给出才覆盖」处理。
+		// 尤其是授权码——一次不带授权码的重导入不该把已存的凭据清空。
+		if strings.TrimSpace(remote.IMAPHost) != "" {
+			mailbox.IMAPHost = strings.TrimSpace(remote.IMAPHost)
+		}
+		if remote.IMAPPort > 0 {
+			mailbox.IMAPPort = remote.IMAPPort
+		}
+		if strings.TrimSpace(remote.IMAPUsername) != "" {
+			mailbox.IMAPUsername = strings.TrimSpace(remote.IMAPUsername)
+		}
+		if strings.TrimSpace(remote.IMAPSecret) != "" {
+			mailbox.IMAPSecret = strings.TrimSpace(remote.IMAPSecret)
+		}
 		if strings.TrimSpace(remote.Label) != "" {
 			mailbox.Label = strings.TrimSpace(remote.Label)
 		}
@@ -159,7 +173,9 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		RemoteOrigin: strings.TrimSpace(remote.Origin), Label: firstNonEmpty(remote.Label, "隐私邮箱 "+now.Format("0102-150405")),
 		Email: email, ForwardToEmail: strings.ToLower(strings.TrimSpace(remote.ForwardToEmail)), APIToken: token, APIActive: true, ICloudActive: remote.IsActive, Status: status,
 		CodeAPIURL: strings.TrimSpace(remote.CodeAPIURL),
-		Note:       firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
+		IMAPHost:   strings.TrimSpace(remote.IMAPHost), IMAPPort: remote.IMAPPort,
+		IMAPUsername: strings.TrimSpace(remote.IMAPUsername), IMAPSecret: strings.TrimSpace(remote.IMAPSecret),
+		Note: firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
 	}
 	mailboxChange, _, err := s.upsertEntityTx(tx, "mailboxes", "mailbox", mailbox.ID, mailbox)
 	if err != nil {
