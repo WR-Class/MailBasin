@@ -103,15 +103,24 @@ type WebSession struct {
 }
 
 type AppleAccount struct {
-	ID           string    `json:"id"`
-	OwnerID      string    `json:"owner_id,omitempty"`
-	Provider     string    `json:"provider,omitempty"`
-	Label        string    `json:"label"`
-	AppleID      string    `json:"apple_id"`
-	Password     string    `json:"password,omitempty"`
-	Status       string    `json:"status"`
-	ICloudStatus string    `json:"icloud_status"`
-	Note         string    `json:"note"`
+	ID           string `json:"id"`
+	OwnerID      string `json:"owner_id,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Label        string `json:"label"`
+	AppleID      string `json:"apple_id"`
+	Password     string `json:"password,omitempty"`
+	Status       string `json:"status"`
+	ICloudStatus string `json:"icloud_status"`
+	Note         string `json:"note"`
+	// 以下四项只对 provider=imap 的账号有意义（QQ、163、自建邮箱）。
+	// Preset 决定服务器地址和界面归属，但不改变同步路径——它们共用一条 IMAP 通路，
+	// 所以页面是「按 preset 过滤同一个组件」，而不是每个服务商一套代码。
+	// Password 在 IMAP 账号上就是客户端授权码，它已经在 apple_accounts 的加密清单里，
+	// 因此不需要新增加密字段。
+	Preset       string    `json:"preset,omitempty"`
+	IMAPHost     string    `json:"imap_host,omitempty"`
+	IMAPPort     int       `json:"imap_port,omitempty"`
+	IMAPUsername string    `json:"imap_username,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -154,10 +163,14 @@ type Mailbox struct {
 	CodeAPIURL string `json:"code_api_url,omitempty"`
 	// 以下四项是 IMAP 取码邮箱的连接信息，只对 ProviderIMAP 有意义。
 	// IMAPSecret 是客户端授权码（QQ / 163）或 App 专用密码，等同于密码，落库必须加密。
-	IMAPHost          string    `json:"imap_host,omitempty"`
-	IMAPPort          int       `json:"imap_port,omitempty"`
-	IMAPUsername      string    `json:"imap_username,omitempty"`
-	IMAPSecret        string    `json:"imap_secret,omitempty"`
+	IMAPHost     string `json:"imap_host,omitempty"`
+	IMAPPort     int    `json:"imap_port,omitempty"`
+	IMAPUsername string `json:"imap_username,omitempty"`
+	IMAPSecret   string `json:"imap_secret,omitempty"`
+	// PoolHidden 为 true 时该邮箱不出现在邮箱池页面，只在其母号页面里可见。
+	// 刻意用「隐藏」而不是「在池里」：旧数据没有这个字段，缺省值必须等于可见，
+	// 反过来写会让升级后所有已有邮箱凭空从邮箱池消失。
+	PoolHidden        bool      `json:"pool_hidden,omitempty"`
 	ReceiveCount      int       `json:"receive_count"`
 	Status            string    `json:"status"`
 	Note              string    `json:"note"`
@@ -226,6 +239,8 @@ type RemoteMailbox struct {
 	IMAPPort     int    `json:"imap_port,omitempty"`
 	IMAPUsername string `json:"imap_username,omitempty"`
 	IMAPSecret   string `json:"imap_secret,omitempty"`
+	// PoolHidden 让新导入的地址默认只挂在母号下，不进邮箱池。
+	PoolHidden bool `json:"pool_hidden,omitempty"`
 }
 
 type Event struct {

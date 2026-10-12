@@ -458,7 +458,10 @@ func (s *Store) GoogleAccounts() []domain.AppleAccount {
 	return s.Accounts(domain.ProviderGoogle)
 }
 
-func (s *Store) Mailboxes(query, status, accountID string, page, pageSize int) domain.MailboxPage {
+// Mailboxes 返回邮箱池的分页结果。poolOnly 为 true 时排除标记为「不进池」的邮箱
+// （目前只有按母号导入的 QQ / 163 地址会这样标记）；母号自己的页面用 AllMailboxes
+// 或按 account_id 过滤，看得到全部，不受这里影响。
+func (s *Store) Mailboxes(query, status, accountID string, poolOnly bool, page, pageSize int) domain.MailboxPage {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	query = strings.ToLower(strings.TrimSpace(query))
@@ -475,6 +478,11 @@ func (s *Store) Mailboxes(query, status, accountID string, page, pageSize int) d
 	}
 	where := []string{"1 = 1"}
 	args := []any{}
+	if poolOnly {
+		// 缺省值必须等于「可见」：旧数据没有这个字段，反过来写会让升级后
+		// 所有已有邮箱凭空从邮箱池消失。
+		where = append(where, `COALESCE(json_extract(data_json, '$.pool_hidden'), 0) = 0`)
+	}
 	if accountID != "" {
 		where = append(where, `json_extract(data_json, '$.account_id') = ?`)
 		args = append(args, accountID)

@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { Activity, Apple, Boxes, ChevronRight, Cloud, Download, Globe, LayoutDashboard, Mail, MailPlus, Settings, X } from '@lucide/vue'
+import { Activity, Apple, Boxes, ChevronRight, Cloud, Download, Globe, Inbox, LayoutDashboard, Mail, MailOpen, MailPlus, Settings, X } from '@lucide/vue'
 import ThemeToggle from './ThemeToggle.vue'
 import { useUpdates } from '../composables/useUpdates'
 
@@ -26,6 +26,9 @@ const items = [
   { name: 'apple-accounts', label: 'Apple 账号', icon: Apple },
   { name: 'microsoft-accounts', label: 'Microsoft 账号', icon: Mail },
   { name: 'google-accounts', label: 'Google 账号', icon: Globe },
+  // QQ 和 163 也是母号：它们自己就是收信的那个邮箱，名下的地址默认不进邮箱池。
+  { name: 'qq-accounts', label: 'QQ 邮箱', icon: MailOpen },
+  { name: 'mail-163-accounts', label: '163 邮箱', icon: Inbox },
   { name: 'mailboxes', label: '邮箱池', icon: Boxes },
   { name: 'tasks', label: '创建隐私邮箱', icon: MailPlus },
   { name: 'exports', label: '本地导出', icon: Download },

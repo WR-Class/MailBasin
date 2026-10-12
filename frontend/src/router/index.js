@@ -6,6 +6,7 @@ import DashboardView from '../views/DashboardView.vue'
 import AppleAccountsView from '../views/AppleAccountsView.vue'
 import MicrosoftAccountsView from '../views/MicrosoftAccountsView.vue'
 import GoogleAccountsView from '../views/GoogleAccountsView.vue'
+import ImapAccountsView from '../views/ImapAccountsView.vue'
 import MailboxesView from '../views/MailboxesView.vue'
 import TasksView from '../views/TasksView.vue'
 import SettingsView from '../views/SettingsView.vue'
@@ -31,6 +32,10 @@ const router = createRouter({
         { path: 'apple-accounts', name: 'apple-accounts', component: AppleAccountsView, meta: { title: 'Apple 账号', subtitle: '管理登录态、IMAP、创建与远端同步' } },
         { path: 'microsoft-accounts', name: 'microsoft-accounts', component: MicrosoftAccountsView, meta: { title: 'Microsoft 账号', subtitle: '通过 Microsoft Graph 读取 Outlook 别名验证码' } },
         { path: 'google-accounts', name: 'google-accounts', component: GoogleAccountsView, meta: { title: 'Google 账号', subtitle: '通过 Gmail API 读取 + 标签地址验证码' } },
+        // QQ 和 163 共用同一个组件，靠 meta.preset 分开。
+        // 两者协议完全相同，只是服务器地址不同，复制一份页面没有意义。
+        { path: 'qq-accounts', name: 'qq-accounts', component: ImapAccountsView, meta: { title: 'QQ 邮箱', subtitle: '母号用 IMAP + 授权码收信，名下地址默认不进邮箱池', preset: 'qq', presetName: 'QQ 邮箱' } },
+        { path: 'mail-163-accounts', name: 'mail-163-accounts', component: ImapAccountsView, meta: { title: '163 邮箱', subtitle: '母号用 IMAP + 授权码收信，名下地址默认不进邮箱池', preset: '163', presetName: '163 邮箱' } },
         { path: 'mailboxes', name: 'mailboxes', component: MailboxesView, meta: { title: '邮箱池', subtitle: '收信、取码、状态维护与 Apple 远端删除' } },
         { path: 'tasks', name: 'tasks', component: TasksView, meta: { title: '创建隐私邮箱', subtitle: '创建一个邮箱或配置自动创建' } },
         { path: 'exports', name: 'exports', component: ExportsView, meta: { title: '本地导出', subtitle: '导出运行数据、邮件、邮箱地址和取码 API' } },

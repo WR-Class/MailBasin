@@ -34,11 +34,6 @@ const showImport = ref(false)
 // 外部取码邮箱：没有母号、没有登录密码，只有一个取码地址。
 const showExternalImport = ref(false)
 const externalImport = reactive({ raw: '', label: '', note: '' })
-// IMAP 取码邮箱：QQ、163、自建。凭服务器地址 + 客户端授权码直连收件箱。
-// 一组凭据对整批地址生效，所以凭据在这里是单个字段，不是每条地址一份。
-const showIMAPImport = ref(false)
-const imapImport = reactive({ preset: 'qq', host: '', port: 0, username: '', secret: '', raw: '', label: '', note: '' })
-const imapPresets = ref([])
 const showSync = ref(false)
 const showBulkDelete = ref(false)
 const bulkDeleteEmails = ref('')
@@ -589,34 +584,6 @@ function openExternalImportDialog() {
   showExternalImport.value = true
 }
 
-// 打开 IMAP 导入弹窗。预设从服务端取，前端不复制一份服务器地址表——
-// QQ 和 163 的地址是数据，只该有一处定义。
-async function openIMAPImportDialog() {
-  showImport.value = false
-  showSync.value = false
-  showBulkDelete.value = false
-  showExternalImport.value = false
-  imapImport.raw = ''
-  imapImport.label = ''
-  imapImport.note = ''
-  imapImport.username = ''
-  imapImport.secret = ''
-  imapImport.host = ''
-  imapImport.port = 0
-  if (!imapPresets.value.length) {
-    try {
-      const payload = await api('/api/mailboxes/imap-presets')
-      imapPresets.value = payload.presets || []
-    } catch (err) {
-      flash(err.message, true)
-    }
-  }
-  if (!imapPresets.value.some((item) => item.key === imapImport.preset)) {
-    imapImport.preset = imapPresets.value[0]?.key || 'qq'
-  }
-  showIMAPImport.value = true
-}
-
 // 抽奖平台发奖文件的固定分隔符：邮箱----取码地址。
 const EXTERNAL_PAIR_SEPARATOR = '----'
 
@@ -766,67 +733,6 @@ async function importExternalMailboxes() {
     flash(err.message, true)
   } finally {
     finishBusy('external-import')
-  }
-}
-
-// 与后端 ParseIMAPMailboxLines 保持同一套规则：空行和 # 注释行跳过，
-// 逗号、分号、制表符、空格分隔的一行多个地址都认，重复地址只留一条。
-function parseIMAPEmails(raw) {
-  const seen = new Set()
-  const out = []
-  for (const line of String(raw || '').replace(/\r\n/g, '\n').split('\n')) {
-    const candidate = line.trim()
-    if (!candidate || candidate.startsWith('#')) continue
-    for (const piece of candidate.split(/[\s,;]+/)) {
-      const email = piece.trim().toLowerCase()
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) continue
-      if (seen.has(email)) continue
-      seen.add(email)
-      out.push(email)
-    }
-  }
-  return out
-}
-
-const imapPreviewCount = computed(() => parseIMAPEmails(imapImport.raw).length)
-const activeIMAPPreset = computed(() => imapPresets.value.find((item) => item.key === imapImport.preset) || null)
-
-// 导入走标准 IMAP 的取码邮箱。凭据是整批共用的，探活由后端做一次。
-async function importIMAPMailboxes() {
-  if (!imapPreviewCount.value) {
-    flash('没能从这些内容里解析出任何邮箱地址，请检查格式', true)
-    return
-  }
-  if (!imapImport.secret.trim()) {
-    flash('请填写客户端授权码（不是邮箱登录密码）', true)
-    return
-  }
-  if (!startBusy('imap-import')) return
-  try {
-    const payload = await api('/api/mailboxes/import-imap', {
-      method: 'POST',
-      body: JSON.stringify({
-        preset: imapImport.preset,
-        host: imapImport.host.trim(),
-        port: Number(imapImport.port) || 0,
-        username: imapImport.username.trim(),
-        secret: imapImport.secret.trim(),
-        raw: imapImport.raw,
-        label: imapImport.label.trim(),
-        note: imapImport.note.trim(),
-      }),
-    })
-    const result = payload.result || {}
-    const parts = [`新增 ${result.created || 0} 个`, `更新 ${result.updated || 0} 个`]
-    if (result.failed) parts.push(`失败 ${result.failed} 个`)
-    if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 条`)
-    flash(`IMAP 邮箱导入完成：${parts.join('，')}`, Boolean(result.failed))
-    if (!result.failed) showIMAPImport.value = false
-    await load()
-  } catch (err) {
-    flash(err.message, true)
-  } finally {
-    finishBusy('imap-import')
   }
 }
 
@@ -1694,7 +1600,6 @@ onBeforeUnmount(() => {
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing-messages') || isBusy('sync-existing') || existingMailboxMessageSync.running" title="读取所有 Apple 主号的全部邮件；IMAP 主路径，iCloud Web 补查并自动合并" @click="syncExistingMailboxMessages"><LoaderCircle v-if="isBusy('sync-existing-messages') || existingMailboxMessageSync.running" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />{{ existingMailboxMessageSync.running ? `正在同步 ${existingMailboxMessageSync.completed_accounts || 0}/${existingMailboxMessageSync.total_accounts || 0}` : isBusy('sync-existing-messages') ? '正在启动同步' : '同步已有邮箱邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('import')" @click="openImportDialog"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><MailPlus v-else :size="14" />{{ isBusy('import') ? '正在导入邮箱' : '导入本地邮箱' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('external-import')" title="导入没有母号、没有密码，只有取件接口的邮箱" @click="openExternalImportDialog"><LoaderCircle v-if="isBusy('external-import')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />导入外部取码邮箱</button>
-          <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('imap-import')" title="导入用标准 IMAP + 客户端授权码收信的邮箱（QQ、163、自建）" @click="openIMAPImportDialog"><LoaderCircle v-if="isBusy('imap-import')" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />导入 QQ/163 邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" title="扫描并彻底删除全部 Apple 账号的云端和本地邮件" @click="cleanAllAppleMail"><LoaderCircle v-if="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />{{ isBusy('clean-summary') ? '正在统计邮件' : isBusy('clean-start') ? '正在启动清理' : appleMailCleanup.running ? `正在清理 ${appleMailCleanup.completed || 0}/${appleMailCleanup.total_accounts || 0}` : '全部彻底清理 Apple 邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="isBusy('bulk-delete-resolve')" title="按邮箱地址批量彻底删除 Apple 云端和本地邮箱" @click="openBulkDeleteDialog"><Trash2 :size="14" />批量删除指定邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="!selectedDeletableCount || deleteConfirmID === 'selected'" :title="selectedDeletableCount ? `彻底删除选中的 ${selectedDeletableCount} 个邮箱` : '请先选择未进入删除队列的邮箱'" @click="removeSelectedMailboxes"><LoaderCircle v-if="deleteConfirmID === 'selected'" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />删除选中{{ selectedDeletableCount ? `（${selectedDeletableCount}）` : '' }}</button>
@@ -1767,33 +1672,6 @@ onBeforeUnmount(() => {
           <p class="apple-dialog-intro">已解析出 <strong>{{ externalPreviewCount }}</strong> 条。两种方式都认：直接粘贴的文本（含 Markdown 表格）和奖品 JSON（<code>{"value":"邮箱----取码地址"}</code>，单个或数组都行）。取码地址里含访问令牌，保存时会加密。</p>
           <p class="apple-dialog-intro">这类邮箱取信靠的是那个接口令牌，不是 Apple 登录态：导入时会先探活一次并如实报告结果，令牌失效会直接说明，不会伪装成「还没收到验证码」。导入后在邮箱池里点「同步」即可取码。</p>
           <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('external-import')" @click="showExternalImport = false">取消</button><button class="primary-button" :disabled="isBusy('external-import') || !externalPreviewCount"><LoaderCircle v-if="isBusy('external-import')" :size="15" class="animate-spin" /><CloudDownload v-else :size="15" />导入 {{ externalPreviewCount }} 个邮箱</button></footer>
-        </form>
-      </div>
-
-      <div v-if="showIMAPImport" class="mailbox-dialog-backdrop" role="presentation" @click.self="showIMAPImport = false">
-        <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="imap-import-title" @submit.prevent="importIMAPMailboxes">
-          <header class="mailbox-dialog-heading"><div><h2 id="imap-import-title"><MailOpen :size="18" />导入 QQ / 163 邮箱</h2><p>适用于用标准 IMAP + 客户端授权码收信的邮箱，自建邮箱也走这里。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('imap-import')" @click="showIMAPImport = false"><X :size="16" /></button></header>
-          <div class="mailbox-dialog-grid">
-            <label class="form-group"><span class="form-label">服务商</span>
-              <select v-model="imapImport.preset" class="field">
-                <option v-for="preset in imapPresets" :key="preset.key" :value="preset.key">{{ preset.name }}</option>
-              </select>
-            </label>
-            <label class="form-group"><span class="form-label">IMAP 服务器</span><input v-model.trim="imapImport.host" class="field" :placeholder="activeIMAPPreset?.host || 'imap.example.com'" /></label>
-            <label class="form-group"><span class="form-label">端口</span><input v-model.number="imapImport.port" class="field" type="number" :placeholder="String(activeIMAPPreset?.port || 993)" /></label>
-            <label class="form-group"><span class="form-label">账号名</span><input v-model.trim="imapImport.username" class="field" placeholder="留空则用第一个邮箱地址" /></label>
-            <label class="form-group mailbox-dialog-wide"><span class="form-label">客户端授权码</span><input v-model.trim="imapImport.secret" class="field font-mono" type="password" placeholder="不是邮箱登录密码" /></label>
-            <div class="form-group mailbox-dialog-wide">
-              <span class="form-label">邮箱地址（一行一个）</span>
-              <textarea v-model="imapImport.raw" class="field font-mono" rows="5" placeholder="12345@qq.com"></textarea>
-            </div>
-            <label class="form-group"><span class="form-label">标签</span><input v-model.trim="imapImport.label" class="field" placeholder="留空则用邮箱地址" /></label>
-            <label class="form-group"><span class="form-label">备注</span><input v-model.trim="imapImport.note" class="field" placeholder="可选" /></label>
-          </div>
-          <p v-if="activeIMAPPreset?.hint" class="apple-dialog-intro"><strong>怎么拿授权码：</strong>{{ activeIMAPPreset.hint }}</p>
-          <p v-if="activeIMAPPreset?.limit" class="apple-dialog-intro"><strong>能挂多少地址：</strong>{{ activeIMAPPreset.limit }}</p>
-          <p class="apple-dialog-intro">已解析出 <strong>{{ imapPreviewCount }}</strong> 个地址。授权码是整批共用的——一个 QQ 邮箱的多个别名共用一个授权码，不用重复填。授权码等同于邮箱密码，保存时会加密。导入时会先探活一次并如实报告结果。</p>
-          <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('imap-import')" @click="showIMAPImport = false">取消</button><button class="primary-button" :disabled="isBusy('imap-import') || !imapPreviewCount"><LoaderCircle v-if="isBusy('imap-import')" :size="15" class="animate-spin" /><MailOpen v-else :size="15" />导入 {{ imapPreviewCount }} 个邮箱</button></footer>
         </form>
       </div>
 

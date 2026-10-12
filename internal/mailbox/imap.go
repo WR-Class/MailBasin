@@ -62,12 +62,18 @@ func ResolveIMAPCredentials(preset, host string, port int, username, secret stri
 	return host, port, strings.TrimSpace(username), strings.TrimSpace(secret)
 }
 
-// ImportIMAPMailboxes 导入一批共用同一组凭据的 IMAP 取码邮箱。
+// ImportIMAPMailboxes 把一批地址挂到一个 IMAP 母号名下。
 //
-// 凭据是整批共用的，不是逐条填写：一个 QQ 邮箱的所有别名都走同一个授权码，
+// 凭据不再逐条传入，而是从母号本身读：一个 QQ 邮箱的所有别名都走同一个授权码，
 // 让使用者为 10 个别名重复粘贴 10 次授权码是没必要的折磨。
 // 代价是授权码按地址各存一份（都加密），换码时重导入一次即可——导入是幂等的。
-func (s *Service) ImportIMAPMailboxes(preset, host string, port int, username, secret string, inputs []IMAPMailboxInput) (IMAPMailboxImportResult, error) {
+//
+// 新地址默认 PoolHidden，只出现在母号页面；要不要进邮箱池由使用者逐个决定。
+func (s *Service) ImportIMAPMailboxes(accountID, preset, host string, port int, username, secret string, inputs []IMAPMailboxInput) (IMAPMailboxImportResult, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return IMAPMailboxImportResult{}, errors.New("缺少母号标识")
+	}
 	if len(inputs) == 0 {
 		return IMAPMailboxImportResult{}, errors.New("请至少提供一条邮箱地址")
 	}
@@ -120,7 +126,7 @@ func (s *Service) ImportIMAPMailboxes(preset, host string, port int, username, s
 		// 账号名逐条回落到该地址本身：QQ 的 IMAP 账号名必须是完整邮箱地址，
 		// 而别名地址登录时用的仍是主地址，所以显式给了用户名就一律用它。
 		mailboxUser := firstNonEmpty(username, email)
-		_, created, err := s.store.UpsertMailboxFromRemote("", domain.RemoteMailbox{
+		_, created, err := s.store.UpsertMailboxFromRemote(accountID, domain.RemoteMailbox{
 			Provider:     domain.ProviderIMAP,
 			Email:        email,
 			Label:        firstNonEmpty(strings.TrimSpace(input.Label), email),
@@ -131,6 +137,9 @@ func (s *Service) ImportIMAPMailboxes(preset, host string, port int, username, s
 			IMAPPort:     port,
 			IMAPUsername: mailboxUser,
 			IMAPSecret:   secret,
+			// 默认不进邮箱池：这批地址的家是母号页面。
+			// 只在新建时生效，之后由使用者在界面上自己决定。
+			PoolHidden: true,
 		}, note)
 		if err != nil {
 			item.Reason = err.Error()

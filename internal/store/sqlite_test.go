@@ -265,7 +265,7 @@ func TestSQLiteUsesNativeMailboxPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page := state.Mailboxes("two", domain.StatusAvailable, "account", 1, 2)
+	page := state.Mailboxes("two", domain.StatusAvailable, "account", false, 1, 2)
 	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Email != "two@icloud.com" {
 		t.Fatalf("SQL 分页筛选不正确：%+v", page)
 	}

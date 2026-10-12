@@ -17,6 +17,17 @@ func newIMAPFixture(t *testing.T) *Service {
 	return service
 }
 
+// createIMAPAccount 建一个母号并返回它的标识。
+// 地址现在一律挂在母号下，所以每条导入相关的测试都要先有一个母号。
+func createIMAPAccount(t *testing.T, service *Service, preset, email, secret string) string {
+	t.Helper()
+	view, _, err := service.CreateIMAPAccount(preset, email, secret, "", 0, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("建母号失败：%v", err)
+	}
+	return view.ID
+}
+
 // seedMailbox 直接往邮箱池里放一个邮箱，用来构造「已存在」的前置条件。
 func seedMailbox(t *testing.T, service *Service, email, provider string) domain.Mailbox {
 	t.Helper()
@@ -128,20 +139,133 @@ func TestResolveIMAPCredentialsUnknownPresetFallsBackToCustom(t *testing.T) {
 	}
 }
 
+// 建母号时母号自己的地址必须成为第一个地址。
+// QQ 和 163 的收信都发生在主地址的收件箱里，少了这一条母号页面连自己的信都看不到。
+func TestCreateIMAPAccountIncludesPrimaryAddress(t *testing.T) {
+	service := newIMAPFixture(t)
+	view, result, err := service.CreateIMAPAccount("qq", "12345@qq.com", "code", "", 0, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("建母号失败：%v", err)
+	}
+	if result.Created != 1 {
+		t.Fatalf("应导入母号自身 1 条，实际 %+v", result)
+	}
+	if view.MailboxCount != 1 || view.Mailboxes[0].Email != "12345@qq.com" {
+		t.Fatalf("母号名下应有它自己的地址，实际 %+v", view.Mailboxes)
+	}
+	if view.ProviderOrDefault() != domain.ProviderIMAP || view.Preset != "qq" {
+		t.Fatalf("母号的 provider / preset 不正确：%q / %q", view.ProviderOrDefault(), view.Preset)
+	}
+}
+
+// 使用者把主地址也粘进地址框时不该出现两条。
+func TestCreateIMAPAccountDeduplicatesPrimaryAddress(t *testing.T) {
+	service := newIMAPFixture(t)
+	view, _, err := service.CreateIMAPAccount("qq", "12345@qq.com", "code", "", 0, "", "", "",
+		[]IMAPMailboxInput{{Email: "12345@qq.com"}, {Email: "alias@qq.com"}})
+	if err != nil {
+		t.Fatalf("建母号失败：%v", err)
+	}
+	if view.MailboxCount != 2 {
+		t.Fatalf("主地址重复粘贴后应仍是 2 条，实际 %d 条：%+v", view.MailboxCount, view.Mailboxes)
+	}
+}
+
+// 新导入的地址默认不进邮箱池：这批地址的家是母号页面。
+func TestImportedIMAPAddressesStayOutOfPoolByDefault(t *testing.T) {
+	service := newIMAPFixture(t)
+	createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	mailbox, ok := service.store.FindMailboxByEmail("12345@qq.com")
+	if !ok {
+		t.Fatal("母号地址应存在")
+	}
+	if !mailbox.PoolHidden {
+		t.Fatal("新导入的 IMAP 地址应默认不进邮箱池")
+	}
+	page := service.store.Mailboxes("", "", "", true, 1, 50)
+	for _, item := range page.Items {
+		if item.Email == "12345@qq.com" {
+			t.Fatal("默认不进池的地址不该出现在邮箱池里")
+		}
+	}
+}
+
+// 但母号页面必须看得到全部，包括不进池的那些——
+// 否则那些地址在界面上就再也找不到了。
+func TestAccountViewShowsAddressesEvenWhenHiddenFromPool(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	view, ok := service.FindIMAPAccount(accountID)
+	if !ok {
+		t.Fatal("母号应能查到")
+	}
+	if view.MailboxCount != 1 || view.PoolCount != 0 {
+		t.Fatalf("母号页面应看到 1 条地址、其中 0 条进池，实际 %d / %d", view.MailboxCount, view.PoolCount)
+	}
+}
+
+// 进池开关是双向的，而且只影响可见性，不动凭据。
+func TestSetMailboxPoolVisibilityRoundTrips(t *testing.T) {
+	service := newIMAPFixture(t)
+	createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	mailbox, _ := service.store.FindMailboxByEmail("12345@qq.com")
+
+	if _, err := service.SetMailboxPoolHidden(mailbox.ID, false); err != nil {
+		t.Fatalf("放进邮箱池失败：%v", err)
+	}
+	page := service.store.Mailboxes("", "", "", true, 1, 50)
+	found := false
+	for _, item := range page.Items {
+		if item.Email == "12345@qq.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("放进池后应能在邮箱池里看到")
+	}
+	if _, err := service.SetMailboxPoolHidden(mailbox.ID, true); err != nil {
+		t.Fatalf("移出邮箱池失败：%v", err)
+	}
+	restored, _ := service.store.FindMailboxByID(mailbox.ID)
+	if !restored.PoolHidden {
+		t.Fatal("移出后应重新变为不进池")
+	}
+	if restored.IMAPSecret != "code" {
+		t.Fatalf("改可见性不该动授权码，实际 %q", restored.IMAPSecret)
+	}
+}
+
+// 重导入不该把使用者手动勾进池的地址又踢出去。
+func TestReimportDoesNotResetPoolVisibility(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	mailbox, _ := service.store.FindMailboxByEmail("12345@qq.com")
+	if _, err := service.SetMailboxPoolHidden(mailbox.ID, false); err != nil {
+		t.Fatalf("放进邮箱池失败：%v", err)
+	}
+	if _, err := service.AddIMAPAccountAddresses(accountID, []IMAPMailboxInput{{Email: "12345@qq.com"}}); err != nil {
+		t.Fatalf("重导入失败：%v", err)
+	}
+	restored, _ := service.store.FindMailboxByID(mailbox.ID)
+	if restored.PoolHidden {
+		t.Fatal("重导入不该把已进池的地址重新标成不进池")
+	}
+}
+
 // 服务器地址只能是主机名或 IP，带上协议和路径是常见的手误，要当场拒绝。
-func TestImportIMAPMailboxesRejectsMalformedHost(t *testing.T) {
+func TestCreateIMAPAccountRejectsMalformedHost(t *testing.T) {
 	service := newIMAPFixture(t)
 	for _, bad := range []string{"https://imap.qq.com", "imap.qq.com/path", "imap qq com", "..", ""} {
-		if _, err := service.ImportIMAPMailboxes("custom", bad, 993, "", "code", []IMAPMailboxInput{{Email: "a@qq.com"}}); err == nil {
+		if _, _, err := service.CreateIMAPAccount("custom", "a@qq.com", "code", bad, 993, "", "", "", nil); err == nil {
 			t.Fatalf("服务器地址 %q 应被拒绝", bad)
 		}
 	}
 }
 
 // 授权码是唯一的凭据，缺了就没什么可导入的，要在写库前拦住。
-func TestImportIMAPMailboxesRejectsMissingSecret(t *testing.T) {
+func TestCreateIMAPAccountRejectsMissingSecret(t *testing.T) {
 	service := newIMAPFixture(t)
-	if _, err := service.ImportIMAPMailboxes("qq", "", 0, "", "   ", []IMAPMailboxInput{{Email: "a@qq.com"}}); err == nil {
+	if _, _, err := service.CreateIMAPAccount("qq", "a@qq.com", "   ", "", 0, "", "", "", nil); err == nil {
 		t.Fatal("缺少授权码时应报错")
 	}
 }
@@ -150,7 +274,9 @@ func TestImportIMAPMailboxesRejectsMissingSecret(t *testing.T) {
 func TestImportIMAPMailboxesRefusesToHijackExistingMailbox(t *testing.T) {
 	service := newIMAPFixture(t)
 	seedMailbox(t, service, "taken@icloud.com", domain.ProviderICloud)
-	result, err := service.ImportIMAPMailboxes("qq", "", 0, "", "code", []IMAPMailboxInput{{Email: "taken@icloud.com"}})
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	result, err := service.ImportIMAPMailboxes(accountID, "qq", "imap.qq.com", 993, "12345@qq.com", "code",
+		[]IMAPMailboxInput{{Email: "taken@icloud.com"}})
 	if err != nil {
 		t.Fatalf("导入不该整体失败：%v", err)
 	}
@@ -169,20 +295,21 @@ func TestImportIMAPMailboxesRefusesToHijackExistingMailbox(t *testing.T) {
 // 同一个地址重复导入是更新，不是新建。
 func TestImportIMAPMailboxesIsIdempotent(t *testing.T) {
 	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code-one")
 	inputs := []IMAPMailboxInput{{Email: "12345@qq.com"}}
-	first, err := service.ImportIMAPMailboxes("qq", "", 0, "12345@qq.com", "code-one", inputs)
+	first, err := service.ImportIMAPMailboxes(accountID, "qq", "imap.qq.com", 993, "12345@qq.com", "code-one", inputs)
 	if err != nil {
 		t.Fatalf("首次导入失败：%v", err)
 	}
-	if first.Created != 1 || first.Updated != 0 {
-		t.Fatalf("首次导入应新建 1 个，实际 %+v", first)
+	if first.Created != 0 || first.Updated != 1 {
+		t.Fatalf("母号自身已在导入时建好，这次应是更新 1 个，实际 %+v", first)
 	}
-	second, err := service.ImportIMAPMailboxes("qq", "", 0, "12345@qq.com", "code-two", inputs)
+	second, err := service.ImportIMAPMailboxes(accountID, "qq", "imap.qq.com", 993, "12345@qq.com", "code-two", inputs)
 	if err != nil {
 		t.Fatalf("二次导入失败：%v", err)
 	}
 	if second.Created != 0 || second.Updated != 1 {
-		t.Fatalf("二次导入应更新 1 个，实际 %+v", second)
+		t.Fatalf("二次导入应仍是更新 1 个，实际 %+v", second)
 	}
 	mailbox, ok := service.store.FindMailboxByEmail("12345@qq.com")
 	if !ok {
@@ -197,9 +324,7 @@ func TestImportIMAPMailboxesIsIdempotent(t *testing.T) {
 // 缺了任何一项，同步时都会退化成「连不上」。
 func TestImportIMAPMailboxesStoresConnectionInfo(t *testing.T) {
 	service := newIMAPFixture(t)
-	if _, err := service.ImportIMAPMailboxes("163", "", 0, "someone@163.com", "sixteen-chars-ok", []IMAPMailboxInput{{Email: "someone@163.com"}}); err != nil {
-		t.Fatalf("导入失败：%v", err)
-	}
+	createIMAPAccount(t, service, "163", "someone@163.com", "sixteen-chars-ok")
 	mailbox, ok := service.store.FindMailboxByEmail("someone@163.com")
 	if !ok {
 		t.Fatal("邮箱应存在")
@@ -221,12 +346,79 @@ func TestImportIMAPMailboxesStoresConnectionInfo(t *testing.T) {
 // 账号名留空时按该地址本身补：QQ 的 IMAP 账号名必须是完整邮箱地址。
 func TestImportIMAPMailboxesDefaultsUsernameToAddress(t *testing.T) {
 	service := newIMAPFixture(t)
-	if _, err := service.ImportIMAPMailboxes("qq", "", 0, "", "code", []IMAPMailboxInput{{Email: "12345@qq.com"}}); err != nil {
-		t.Fatalf("导入失败：%v", err)
-	}
+	createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
 	mailbox, _ := service.store.FindMailboxByEmail("12345@qq.com")
 	if mailbox.IMAPUsername != "12345@qq.com" {
 		t.Fatalf("账号名应回落到地址本身，实际 %q", mailbox.IMAPUsername)
+	}
+}
+
+// 地址必须挂在母号下，否则母号页面看不到它。
+func TestImportedAddressesBelongToTheAccount(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	if _, err := service.AddIMAPAccountAddresses(accountID, []IMAPMailboxInput{{Email: "alias@qq.com"}}); err != nil {
+		t.Fatalf("追加地址失败：%v", err)
+	}
+	mailbox, ok := service.store.FindMailboxByEmail("alias@qq.com")
+	if !ok {
+		t.Fatal("追加的地址应存在")
+	}
+	if mailbox.AccountID != accountID {
+		t.Fatalf("追加的地址应挂在母号下，实际 %q", mailbox.AccountID)
+	}
+}
+
+// 两个界面靠 preset 分开：QQ 页面不该看到 163 的母号。
+func TestIMAPAccountsFilterByPreset(t *testing.T) {
+	service := newIMAPFixture(t)
+	createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	createIMAPAccount(t, service, "163", "someone@163.com", "code")
+
+	qq := service.IMAPAccounts("qq")
+	if len(qq) != 1 || qq[0].AppleID != "12345@qq.com" {
+		t.Fatalf("QQ 页面应只看到 QQ 母号，实际 %+v", qq)
+	}
+	mail163 := service.IMAPAccounts("163")
+	if len(mail163) != 1 || mail163[0].AppleID != "someone@163.com" {
+		t.Fatalf("163 页面应只看到 163 母号，实际 %+v", mail163)
+	}
+	if all := service.IMAPAccounts(""); len(all) != 2 {
+		t.Fatalf("不带 preset 应看到全部 2 个，实际 %d 个", len(all))
+	}
+}
+
+// 授权码留空的重导入不该把已存的凭据清空。
+func TestSaveIMAPAccountKeepsSecretWhenOmitted(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "original-code")
+	if _, _, err := service.store.SaveIMAPAccount(domain.AppleAccount{
+		Provider: domain.ProviderIMAP, Preset: "qq", AppleID: "12345@qq.com",
+		IMAPHost: "imap.qq.com", IMAPPort: 993,
+	}); err != nil {
+		t.Fatalf("重存失败：%v", err)
+	}
+	account, ok := service.store.FindAppleAccount(accountID)
+	if !ok {
+		t.Fatal("母号应还在")
+	}
+	if account.Password != "original-code" {
+		t.Fatalf("授权码不该被空值清掉，实际 %q", account.Password)
+	}
+}
+
+// 删除母号要连带清掉它的地址和邮件，不留孤儿。
+func TestDeleteIMAPAccountRemovesAddresses(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
+	if _, err := service.DeleteIMAPAccount(accountID); err != nil {
+		t.Fatalf("删除母号失败：%v", err)
+	}
+	if _, ok := service.store.FindMailboxByEmail("12345@qq.com"); ok {
+		t.Fatal("母号删除后它的地址不该还在")
+	}
+	if _, ok := service.store.FindAppleAccount(accountID); ok {
+		t.Fatal("母号本身应被删除")
 	}
 }
 
@@ -248,4 +440,42 @@ func TestSyncIMAPMailboxRejectsMailboxWithoutCredentials(t *testing.T) {
 	if _, err := service.SyncIMAPMailbox(context.Background(), mailbox.ID); err == nil {
 		t.Fatal("缺少连接信息时应报错")
 	}
+}
+
+// 没有地址的母号不能去同步，也不该把状态标成正常。
+func TestSyncIMAPAccountRejectsAccountWithoutAddresses(t *testing.T) {
+	service := newIMAPFixture(t)
+	account, _, err := service.store.SaveIMAPAccount(domain.AppleAccount{
+		Provider: domain.ProviderIMAP, Preset: "qq", AppleID: "empty@qq.com",
+		IMAPHost: "imap.qq.com", IMAPPort: 993, Password: "code",
+	})
+	if err != nil {
+		t.Fatalf("建母号失败：%v", err)
+	}
+	if _, err := service.SyncIMAPAccount(context.Background(), account.ID); err == nil {
+		t.Fatal("没有地址的母号应拒绝同步")
+	}
+}
+
+// 不属于 IMAP 的母号标识不能走 IMAP 母号的同步路径——
+// 那会拿别的服务商的账号去连一个空的服务器地址。
+func TestSyncIMAPAccountRejectsNonIMAPAccountID(t *testing.T) {
+	service := newIMAPFixture(t)
+	accountID := seedMicrosoftAccount(t, service, "x@outlook.com")
+	if _, err := service.SyncIMAPAccount(context.Background(), accountID); err == nil {
+		t.Fatal("Microsoft 母号不该能走 IMAP 母号的同步路径")
+	}
+	if _, err := service.SyncIMAPAccount(context.Background(), "acc_not_exist"); err == nil {
+		t.Fatal("不存在的母号应拒绝同步")
+	}
+}
+
+// seedMicrosoftAccount 放一个别的服务商的母号，用来验证 IMAP 路径不会误接它。
+func seedMicrosoftAccount(t *testing.T, service *Service, email string) string {
+	t.Helper()
+	session, err := service.store.SaveMicrosoftSession(domain.MicrosoftSession{Email: email})
+	if err != nil {
+		t.Fatalf("放置 Microsoft 母号失败：%v", err)
+	}
+	return session.AccountID
 }

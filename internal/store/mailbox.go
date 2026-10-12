@@ -128,6 +128,8 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		if strings.TrimSpace(remote.IMAPSecret) != "" {
 			mailbox.IMAPSecret = strings.TrimSpace(remote.IMAPSecret)
 		}
+		// PoolHidden 刻意不在这里覆盖：使用者手动把地址勾进邮箱池之后，
+		// 一次重导入不该把它又踢出去。改可见性只走 SetMailboxPoolHidden 这一条路。
 		if strings.TrimSpace(remote.Label) != "" {
 			mailbox.Label = strings.TrimSpace(remote.Label)
 		}
@@ -175,7 +177,8 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		CodeAPIURL: strings.TrimSpace(remote.CodeAPIURL),
 		IMAPHost:   strings.TrimSpace(remote.IMAPHost), IMAPPort: remote.IMAPPort,
 		IMAPUsername: strings.TrimSpace(remote.IMAPUsername), IMAPSecret: strings.TrimSpace(remote.IMAPSecret),
-		Note: firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
+		PoolHidden: remote.PoolHidden,
+		Note:       firstNonEmpty(remote.Note, defaultNote), CreatedAt: now, UpdatedAt: now,
 	}
 	mailboxChange, _, err := s.upsertEntityTx(tx, "mailboxes", "mailbox", mailbox.ID, mailbox)
 	if err != nil {
@@ -188,6 +191,38 @@ func (s *Store) UpsertMailboxFromRemote(accountID string, remote domain.RemoteMa
 		return domain.Mailbox{}, false, err
 	}
 	return mailbox, true, s.commitTx(tx, []Change{mailboxChange, eventChange})
+}
+
+// SetMailboxPoolHidden 切换一个邮箱是否出现在邮箱池页面。
+// 这是修改可见性的唯一入口：导入路径只负责给新地址一个默认值，
+// 之后由使用者自己决定，重导入不会再改动它。
+func (s *Store) SetMailboxPoolHidden(id string, hidden bool) (domain.Mailbox, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return domain.Mailbox{}, err
+	}
+	var mailbox domain.Mailbox
+	if found, err := s.readEntityTx(tx, "mailboxes", id, &mailbox); err != nil || !found {
+		_ = tx.Rollback()
+		if err != nil {
+			return domain.Mailbox{}, err
+		}
+		return domain.Mailbox{}, errors.New("邮箱不存在")
+	}
+	if mailbox.PoolHidden == hidden {
+		_ = tx.Rollback()
+		return mailbox, nil
+	}
+	mailbox.PoolHidden = hidden
+	mailbox.UpdatedAt = time.Now()
+	change, _, err := s.upsertEntityTx(tx, "mailboxes", "mailbox", mailbox.ID, mailbox)
+	if err != nil {
+		_ = tx.Rollback()
+		return domain.Mailbox{}, err
+	}
+	return mailbox, s.commitTx(tx, []Change{change})
 }
 
 func (s *Store) SetMailboxRemoteIdentity(id, anonymousID, origin string) (domain.Mailbox, error) {
