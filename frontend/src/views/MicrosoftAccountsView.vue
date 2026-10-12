@@ -13,7 +13,6 @@ const showLogin = ref(false)
 const showAddAlias = ref(false)
 const data = ref({ items: [], module: {}, module_ready: true })
 const selected = ref(null)
-const aliases = ref([])
 // 展开块里的三块分区默认都收起：别名一多，平铺着翻到最下面那块要很久。
 const openSections = reactive({ auth: false, aliases: false })
 // 授权信息就地编辑。留空＝回落到内置公共客户端，语义与系统设置页一致。
@@ -109,7 +108,6 @@ async function load(options = {}) {
       if (current) selected.value = { ...selected.value, ...current }
       else {
         selected.value = null
-        aliases.value = []
         poolMailboxes.value = []
       }
     }
@@ -123,7 +121,7 @@ async function load(options = {}) {
 function scheduleRealtimeRefresh(change) {
   if (change.resource === 'microsoft-session') {
     window.clearTimeout(realtimeRefreshTimer)
-    realtimeRefreshTimer = window.setTimeout(() => load({ silent: true }), 120)
+    realtimeRefreshTimer = window.setTimeout(refreshAfterChange, 120)
     return
   }
   if (change.resource === 'apple-account' && change.operation === 'updated' && change.payload?.data?.id) {
@@ -136,7 +134,7 @@ function scheduleRealtimeRefresh(change) {
     if (applied) return
   }
   window.clearTimeout(realtimeRefreshTimer)
-  realtimeRefreshTimer = window.setTimeout(() => load({ silent: true }), 120)
+  realtimeRefreshTimer = window.setTimeout(refreshAfterChange, 120)
 }
 
 function stopPolling() {
@@ -246,7 +244,6 @@ async function openVerificationPage() {
 async function toggleAccount(account) {
   if (selected.value?.id === account.id) {
     selected.value = null
-    aliases.value = []
     poolMailboxes.value = []
     return
   }
@@ -259,7 +256,6 @@ async function selectAccount(account) {
   try {
     const result = await api(`/api/microsoft-accounts/${account.id}`)
     selected.value = result.account
-    aliases.value = (result.mailboxes || []).map((item) => item.email)
     poolMailboxes.value = result.mailboxes || []
   } catch (err) {
     flash(err.message, true)
@@ -280,6 +276,13 @@ async function refreshPool() {
   } catch {
     // 刷新失败就保持原样，不要因此把已经显示出来的列表清空。
   }
+}
+
+// 账号列表和邮箱池是两份数据：load() 只重拉账号列表，池子那一段得单独刷。
+// 任何一个会改动邮箱池的动作（导入别名、导入主地址、批量生成、手工添加）之后
+// 都必须走这个，否则会出现「提示添加成功、列表里却看不见」。
+async function refreshAfterChange() {
+  await Promise.all([load({ silent: true }), refreshPool()])
 }
 
 function primaryAddress() {
@@ -322,8 +325,7 @@ async function deleteAlias(mailbox) {
     if (!confirmed) return
     await api(`/api/mailboxes/${encodeURIComponent(mailbox.id)}?local_only=true`, { method: 'DELETE' })
     flash(`已从邮箱池删除 ${mailbox.email}`)
-    await refreshPool()
-    await load({ silent: true })
+    await refreshAfterChange()
   } catch (err) {
     flash(err.message, true)
   } finally {
@@ -383,7 +385,7 @@ async function deleteAccount(account) {
     const result = await api(`/api/microsoft-accounts/${account.id}`, { method: 'DELETE' })
     if (selected.value?.id === account.id) {
       selected.value = null
-      aliases.value = []
+      poolMailboxes.value = []
     }
     await load()
     const deleted = result.deleted || {}
@@ -414,8 +416,14 @@ async function discoverAliases() {
   if (!startBusy('aliases')) return
   try {
     const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases`)
-    aliases.value = result.aliases || []
-    flash(result.count ? `发现 ${result.count} 个邮件地址` : '该账号未返回代理地址，请手工添加别名')
+    // 这一段列表展示的是本机邮箱池，而「发现别名」只读 Graph、不动池子。
+    // 所以必须在这里说清「发现了几个、其中几个还没进池」，否则点完屏幕上什么都不会变。
+    const remote = result.aliases || []
+    const inPool = new Set(poolMailboxes.value.map((item) => String(item.email || '').toLowerCase()))
+    const missing = remote.filter((address) => !inPool.has(String(address).toLowerCase()))
+    if (!remote.length) flash('该账号未返回代理地址，请手工添加别名')
+    else if (missing.length) flash(`发现 ${remote.length} 个地址，其中 ${missing.length} 个还没进池，点「导入别名」写进来`)
+    else flash(`发现 ${remote.length} 个地址，都已在本机邮箱池里`)
   } catch (err) {
     flash(err.message, true)
   } finally {
@@ -428,9 +436,8 @@ async function importAliases() {
   if (!startBusy('import')) return
   try {
     const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases/import`, { method: 'POST' })
-    aliases.value = result.aliases || []
     flash(`别名导入完成：新增 ${result.created} 个，更新 ${result.updated} 个`)
-    await load()
+    await refreshAfterChange()
   } catch (err) {
     flash(err.message, true)
   } finally {
@@ -445,9 +452,8 @@ async function importPrimary() {
   if (!startBusy('import')) return
   try {
     const result = await api(`/api/microsoft-accounts/${selected.value.id}/aliases/import-primary`, { method: 'POST' })
-    aliases.value = result.aliases || []
     flash(`主地址导入完成：新增 ${result.created} 个，更新 ${result.updated} 个`)
-    await load()
+    await refreshAfterChange()
   } catch (err) {
     flash(err.message, true)
   } finally {
@@ -505,7 +511,7 @@ async function generateAliases() {
     const skipped = result.skipped ? `，未能生成 ${result.skipped} 个` : ''
     flash(`已生成 ${result.created} 个 Outlook + 地址${skipped}`)
     showBatch.value = false
-    await load()
+    await refreshAfterChange()
   } catch (err) {
     flash(err.message, true)
   } finally {
@@ -523,8 +529,7 @@ async function addAlias() {
     })
     showAddAlias.value = false
     flash(`${result.created ? '已添加' : '已更新'}别名：${result.mailbox.email}`)
-    aliases.value = [...new Set([...aliases.value, result.mailbox.email])]
-    await load()
+    await refreshAfterChange()
   } catch (err) {
     flash(err.message, true)
   } finally {
