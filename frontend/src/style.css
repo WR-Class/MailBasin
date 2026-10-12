@@ -857,7 +857,10 @@ textarea.field {
   height: clamp(430px, calc(100vh - 170px), 720px);
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  /* 详情块搬进展开行之后，列表右边就没有东西了，所以默认单列。
+     还没搬的页面右侧仍然有 .apple-detail-panel，下面用 :has 把原来的两列要回去，
+     这样改造可以一个渠道一个渠道地做，不会让没动过的页面塌成上下两截。 */
+  grid-template-columns: minmax(0, 1fr);
   background: var(--app-surface);
 }
 
@@ -866,7 +869,43 @@ textarea.field {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--app-line);
+}
+
+/* 右侧仍保留详情栏的页面：维持改造前的两列外观。窄屏规则在下面 860px 处，
+   这里用 min-width 让位，免得把窄屏的横线压成竖线。 */
+@media (min-width: 861px) {
+  .apple-account-body:has(> .apple-detail-panel) {
+    grid-template-columns: minmax(0, 1fr) 330px;
+  }
+
+  .apple-account-body:has(> .apple-detail-panel) .apple-account-list {
+    border-right: 1px solid var(--app-line);
+  }
+}
+
+/* 详情块现在挂在被点开的那一行正下方，所以原来那条把列表和侧栏分开的竖线
+   没有东西可分了——留着会变成一条悬空的边。 */
+.apple-account-expand-row > .apple-account-expand-cell {
+  padding: 0;
+  border-bottom: 1px solid var(--app-line);
+  background: var(--app-surface-soft);
+}
+.apple-account-expand-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 14px 14px;
+  text-align: left;
+}
+.apple-account-expand-body .apple-detail-heading {
+  border: 1px solid var(--app-line);
+  border-radius: 10px;
+  background: var(--app-surface);
+}
+.apple-account-expand-row .ms-detail-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .apple-section-heading,
@@ -2821,7 +2860,7 @@ textarea.field {
 }
 
 @media (max-width: 1050px) {
-  .apple-account-body {
+  .apple-account-body:has(> .apple-detail-panel) {
     grid-template-columns: minmax(560px, 1fr) minmax(300px, 340px);
   }
 

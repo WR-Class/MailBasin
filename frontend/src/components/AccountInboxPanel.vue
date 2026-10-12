@@ -64,14 +64,43 @@ async function load(options = {}) {
   }
 }
 
+// 剪贴板 API 只在安全上下文里可用：localhost 算安全，局域网 IP 不算。
+// 所以在它缺席或拒绝时退回 execCommand；两条路都失败就把话说清楚，
+// 而不是点下去什么都不发生。
+async function writeClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // 落到下面的兜底
+    }
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.top = '-1000px'
+    document.body.appendChild(area)
+    try {
+      // 先给焦点再选中：有些浏览器不这样就不让 execCommand 真的写入剪贴板。
+      area.focus()
+      area.select()
+      area.setSelectionRange(0, text.length)
+      return document.execCommand('copy')
+    } finally {
+      document.body.removeChild(area)
+    }
+  } catch {
+    return false
+  }
+}
+
 async function copyCode(code) {
   if (!code) return
-  try {
-    await navigator.clipboard.writeText(code)
-    success(`已复制验证码 ${code}`)
-  } catch {
-    showError('浏览器拒绝了剪贴板访问，请手动选中复制')
-  }
+  if (await writeClipboard(code)) success(`已复制验证码 ${code}`)
+  else showError('浏览器拒绝了剪贴板访问，请手动选中复制')
 }
 
 function scheduleRealtimeRefresh(change) {
@@ -122,7 +151,9 @@ onBeforeUnmount(() => {
           <span class="inbox-address-email font-mono">{{ mailbox.email }}</span>
           <span v-if="!mailbox.pool_hidden" class="inbox-tag inbox-tag-pool">已在邮箱池</span>
           <span v-else class="inbox-tag">未进池</span>
-          <span v-if="mailbox.last_code" class="inbox-tag inbox-tag-code" :title="formatTime(mailbox.last_code_at)">最近验证码 {{ mailbox.last_code }}</span>
+          <button v-if="mailbox.last_code" type="button" class="inbox-tag inbox-tag-code inbox-tag-copy" :title="`复制验证码 ${mailbox.last_code}（收到于 ${formatTime(mailbox.last_code_at)}）`" @click="copyCode(mailbox.last_code)">
+            <Clipboard :size="11" /><span>最近验证码</span><span class="font-mono inbox-tag-code-value">{{ mailbox.last_code }}</span>
+          </button>
           <span v-else class="inbox-tag inbox-tag-muted">暂无验证码</span>
         </article>
       </div>
@@ -163,6 +194,11 @@ onBeforeUnmount(() => {
 .inbox-tag-pool { background: rgba(56, 189, 248, 0.18); }
 .inbox-tag-code { background: rgba(16, 185, 129, 0.18); }
 .inbox-tag-muted { opacity: 0.55; }
+/* 「最近验证码」现在是个真按钮：一眼要能看出可以点。 */
+.inbox-tag-copy { display: inline-flex; align-items: center; gap: 4px; border: 1px solid rgba(16, 185, 129, 0.45); color: inherit; font: inherit; cursor: pointer; }
+.inbox-tag-copy:hover { background: rgba(16, 185, 129, 0.3); }
+.inbox-tag-copy:active { transform: translateY(1px); }
+.inbox-tag-code-value { font-weight: 700; letter-spacing: 0.04em; }
 .inbox-message-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 340px; overflow-y: auto; }
 .inbox-message-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--surface-2, rgba(120, 120, 140, 0.08)); }
 .inbox-message-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }

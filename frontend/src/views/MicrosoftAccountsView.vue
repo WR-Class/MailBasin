@@ -233,6 +233,16 @@ async function openVerificationPage() {
   window.open(login.verification_uri, '_blank', 'noopener')
 }
 
+// 点已经展开的那一行要收起。默认不选中任何行，也就是默认折叠。
+async function toggleAccount(account) {
+  if (selected.value?.id === account.id) {
+    selected.value = null
+    aliases.value = []
+    return
+  }
+  await selectAccount(account)
+}
+
 async function selectAccount(account) {
   const busyKey = `detail:${account.id}`
   if (!startBusy(busyKey)) return
@@ -452,20 +462,16 @@ onBeforeUnmount(() => {
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
               <thead><tr><th>Microsoft 账号</th><th>状态</th><th>读信通道</th><th>操作</th></tr></thead>
               <tbody>
-                <tr v-for="account in data.items" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id || 'Microsoft 账号'} 的授权详情`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                <template v-for="account in data.items" :key="account.id">
+                <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${account.label || account.apple_id || 'Microsoft 账号'} 的授权详情`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
                   <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Mail v-else :size="14" /></span><span><strong>{{ account.label || account.apple_id || 'Microsoft 账号' }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
                   <td><span :class="statusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span class="apple-channel-pill"><Cloud :size="11" /><span>Microsoft Graph</span><em class="bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">官方 API</em></span></div></td>
                   <td><button type="button" class="apple-delete-button" :title="`删除 ${account.label || account.apple_id || 'Microsoft 账号'}`" :aria-label="`删除 ${account.label || account.apple_id || 'Microsoft 账号'}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
                 </tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <aside class="apple-detail-panel">
-          <div v-if="!selected" class="apple-detail-empty"><span><Mail :size="20" /></span><strong>选择一个 Microsoft 账号</strong><small>OAuth2 授权状态与别名列表会显示在这里。</small></div>
-          <template v-else>
+                <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
+                  <td colspan="4" class="apple-account-expand-cell">
+                    <div class="apple-account-expand-body">
             <header class="apple-detail-heading"><div><span>所选 Microsoft 账号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button></header>
             <div class="ms-detail-scroll">
             <div class="apple-state-list">
@@ -500,9 +506,15 @@ onBeforeUnmount(() => {
               <p v-if="moduleInfo.using_default_client" class="apple-detail-hint"><AlertCircle :size="13" />当前使用内置公共客户端，建议在系统设置中填入自己的 Azure 应用 ID 以提高稳定性。</p>
             </div>
             </div>
-          </template>
-          <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
-        </aside>
+                    <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
+                    </div>
+                  </td>
+                </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     </section>
 
