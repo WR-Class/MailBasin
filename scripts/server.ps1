@@ -1,41 +1,43 @@
 ﻿<#
 .SYNOPSIS
-  MailBasin 服务的启停入口：start / stop / restart / status。
+  MailBasin 服务的启停入口：start / stop / restart / status / install-task / uninstall-task。
 
 .DESCRIPTION
   这是「怎么启动这个服务」的单一出处。以后要重启它，用这个脚本，
-  不要由 agent 临场拼 Start-Process 命令。
+  不要由 agent 临场拼命令。
 
-  服务用 WMI（Win32_Process.Create）启动，所以新进程的父进程是 WmiPrvSE.exe，
-  祖先链走到 DCOM 服务，与 DSH 无关。这一点是刻意的：
+  服务由计划任务 MailBasin 托管。任务由计划任务服务（svchost）承载，那个服务
+  早于 DSH 存在，不可能落在 DSH 的作业里——这是结构上的理由。
 
-    用 Start-Process 启动会把服务留在 DSH 的进程树下。父进程退出不会带走子进程，
-    所以它看起来没事——但作业对象（KILL_ON_JOB_CLOSE）会。而作业归属在这台机器上
-    查不清：IsProcessInJob 传 NULL 在 Win8+ 上对几乎所有进程都返回真（嵌套作业），
-    没有区分度；NtQueryInformationProcess 取作业句柄返回 STATUS_INFO_LENGTH_MISMATCH。
-    查不清就不猜，换成一条祖先链可验证的路。
+  为什么不用 WMI 换父进程：试过，被实测证伪。WMI（Win32_Process.Create）能把
+  父进程换成 WmiPrvSE.exe，祖先链当时也验证过（ipm-server ← cmd ← WmiPrvSE ←
+  svchost ← services ← wininit，链上确实没有 DSH），但 DSH 一重启服务照样被带走——
+  它自己的日志留下了关闭记录。换父进程不等于脱离，祖先链干净不是安全证据。
 
-  判据是可观察的：status 会打印祖先链，链上不该出现 DSH 的进程。
+  start 只是触发那个任务；服务不是这个脚本的孩子，也不在 DSH 的树下。
+  install-task 注册任务并放一个桌面快捷方式，那是新机器上的第一步。
 
 .PARAMETER Action
-  start   启动（已在运行则什么都不做）
-  stop    停止
-  restart 先停后启
-  status  打印 PID、祖先链和一次 HTTP 探测（默认动作）
+  start          触发计划任务启动（已在运行则什么都不做）
+  stop           停止
+  restart        先停后启
+  status         打印 PID、祖先链和一次 HTTP 探测（默认动作）
+  install-task   注册计划任务 + 创建桌面快捷方式
+  uninstall-task 注销计划任务 + 删除桌面快捷方式
 
 .PARAMETER Port
   服务监听端口，默认 8788。
 
 .EXAMPLE
-  powershell -NoProfile -File scripts\server.ps1 restart
+  scripts\server.cmd install-task
 
 .EXAMPLE
-  scripts\server.cmd status
+  scripts\server.cmd restart
 #>
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('start', 'stop', 'restart', 'status')]
+  [ValidateSet('start', 'stop', 'restart', 'status', 'install-task', 'uninstall-task')]
   [string]$Action = 'status',
 
   [int]$Port = 8788,
@@ -52,6 +54,14 @@ $RunDir    = Join-Path $RepoRoot 'data\run'        # data/ 已在 .gitignore 里
 $StdinFile = Join-Path $RunDir 'server.stdin.txt'
 $OutLog    = Join-Path $RunDir 'server.out.log'
 $ErrLog    = Join-Path $RunDir 'server.err.log'
+
+# 服务由计划任务托管。任务由计划任务服务（svchost）承载，那个服务早于 agent 存在，
+# 不可能落在 agent 的作业里——这是结构上的理由，比「换成别的父进程」强。
+# 之前用 WMI 换父进程的做法已被实测证伪：祖先链上确实没有 agent，服务照样在
+# DSH 重启时被带走（日志显示它干净退出）。
+$TaskName  = 'MailBasin'
+$TaskVbs   = Join-Path $PSScriptRoot 'server-run-hidden.vbs'
+$StartVbs  = Join-Path $PSScriptRoot 'server-start-silent.vbs'
 
 # agent 自己的进程名。祖先链上出现任何一个，都说明这次启动没摘干净。
 $AgentProcessNames = @('DeepSeek Harness.exe', 'electron.exe')
@@ -110,30 +120,21 @@ function Show-LogTail {
   Get-Content $Path -Tail $Lines | ForEach-Object { Write-Host "  $_" }
 }
 
+function Test-TaskRegistered {
+  return [bool](Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)
+}
+
 function Invoke-Start {
   $existing = Get-ServerProcessId
   if ($existing) {
     Write-Host "服务已在运行，PID $existing（端口 $Port）。要重启请用 restart。"
     return
   }
-  if (-not (Test-Path $Exe)) { throw "找不到可执行文件：$Exe（先构建：go build -o bin/ipm-server.exe .）" }
-  New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
-
-  # 日志轮转，只留上一份，免得无限增长。
-  foreach ($file in @($OutLog, $ErrLog)) {
-    if (Test-Path $file) { Move-Item -Force $file ($file -replace '\.log$', '.prev.log') }
+  if (-not (Test-TaskRegistered)) {
+    throw "计划任务 $TaskName 还没注册。先跑一次：scripts\server.cmd install-task"
   }
-  # 这个二进制是个交互式菜单，需要一个 stdin 的「1」才会进入服务模式。
-  [System.IO.File]::WriteAllText($StdinFile, '1', (New-Object System.Text.ASCIIEncoding))
-
-  # WMI 创建：父进程是 WmiPrvSE.exe，不在 DSH 的进程树里，也不继承它的作业对象。
-  # cmd /c 只是为了把 stdin 和两个日志重定向带上。
-  $commandLine = 'cmd /c cd /d "{0}" && "{1}" < "{2}" > "{3}" 2> "{4}"' -f $RepoRoot, $Exe, $StdinFile, $OutLog, $ErrLog
-  $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine }
-  if ($result.ReturnValue -ne 0) {
-    Show-LogTail -Path $ErrLog
-    throw "WMI 创建进程失败，ReturnValue=$($result.ReturnValue)。错误日志在上面。"
-  }
+  # 触发任务，服务由计划任务服务托管——不经过 DSH，也不经过这个脚本。
+  Start-ScheduledTask -TaskName $TaskName
 
   $serverPid = $null
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -183,9 +184,59 @@ function Invoke-Status {
   }
 }
 
+function Invoke-InstallTask {
+  if (-not (Test-Path $TaskVbs)) { throw "找不到任务入口脚本：$TaskVbs" }
+  if (-not (Test-Path $StartVbs)) { throw "找不到快捷方式入口脚本：$StartVbs" }
+  if (-not (Test-Path $Exe)) { throw "找不到可执行文件：$Exe（先构建：go build -o bin/ipm-server.exe .）" }
+  New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+
+  # 任务动作里必须写绝对路径，并显式给 -WorkingDirectory：任务环境里没有 %~dp0，
+  # 相对路径会落到 system32。
+  # 不传 -Trigger 就是纯按需：Start-ScheduledTask / schtasks /run 唤得起，
+  # 但不会开机自启——使用者要的是脱离 agent，不是自启。
+  $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"{0}"' -f $TaskVbs) -WorkingDirectory $RepoRoot
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -Force `
+    -Description 'MailBasin 本地服务。由计划任务托管，所以重启 DSH 不会带走它。按需运行，无触发器。' | Out-Null
+  Write-Host "已注册计划任务 $TaskName（按需、无触发器、不限执行时长、单实例）"
+
+  # 桌面快捷方式指向 wscript.exe 跑启动脚本：wscript 是 GUI 子系统程序，
+  # 不分配控制台，所以双击下去全程不会闪黑框。
+  $desktop = [Environment]::GetFolderPath('Desktop')
+  $lnkPath = Join-Path $desktop 'MailBasin 启动.lnk'
+  $ws = New-Object -ComObject WScript.Shell
+  $lnk = $ws.CreateShortcut($lnkPath)
+  $lnk.TargetPath = 'wscript.exe'
+  $lnk.Arguments = '"{0}"' -f $StartVbs
+  $lnk.WorkingDirectory = $RepoRoot
+  $lnk.Description = '静默启动 MailBasin 服务'
+  $lnk.IconLocation = "$env:SystemRoot\System32\shell32.dll,13"
+  $lnk.Save()
+  Write-Host "已创建桌面快捷方式：$lnkPath"
+}
+
+function Invoke-UninstallTask {
+  if (Test-TaskRegistered) {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Write-Host "已注销计划任务 $TaskName"
+  } else {
+    Write-Host "计划任务 $TaskName 本来就没注册。"
+  }
+  $lnkPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'MailBasin 启动.lnk'
+  if (Test-Path $lnkPath) {
+    Remove-Item -Force $lnkPath
+    Write-Host "已删除桌面快捷方式：$lnkPath"
+  }
+}
+
 switch ($Action) {
-  'start'   { Invoke-Start }
-  'stop'    { Invoke-Stop }
-  'restart' { Invoke-Stop; Invoke-Start }
-  'status'  { Invoke-Status }
+  'start'          { Invoke-Start }
+  'stop'           { Invoke-Stop }
+  'restart'        { Invoke-Stop; Invoke-Start }
+  'status'         { Invoke-Status }
+  'install-task'   { Invoke-InstallTask }
+  'uninstall-task' { Invoke-UninstallTask }
 }
