@@ -22,25 +22,37 @@ type IMAPAccountView struct {
 	MessageCount int              `json:"message_count"`
 }
 
+// buildIMAPAccountView 把母号和它名下的地址拼成视图，并算好三个计数。
+// 列表和详情共用它，免得两处的计数口径慢慢分叉。
+func buildIMAPAccountView(account domain.AppleAccount, mailboxes []domain.Mailbox) IMAPAccountView {
+	if mailboxes == nil {
+		// 空列表要序列化成 []，不是 null：前端直接 v-for，null 会让它炸。
+		mailboxes = []domain.Mailbox{}
+	}
+	view := IMAPAccountView{AppleAccount: account, Mailboxes: mailboxes, MailboxCount: len(mailboxes)}
+	for _, mailbox := range mailboxes {
+		if !mailbox.PoolHidden {
+			view.PoolCount++
+		}
+		view.MessageCount += mailbox.ReceiveCount
+	}
+	return view
+}
+
 // IMAPAccounts 按 preset 返回母号列表；preset 为空时返回全部 IMAP 母号。
-// 两个界面（QQ 邮箱 / 163 邮箱）用的是同一个函数，只是传入的 preset 不同。
+// 三个界面（QQ 邮箱 / 163 邮箱 / Gmail）用的是同一个函数，只是传入的 preset 不同。
 func (s *Service) IMAPAccounts(preset string) []IMAPAccountView {
 	preset = strings.ToLower(strings.TrimSpace(preset))
 	accounts := s.store.Accounts(domain.ProviderIMAP)
+	// 一次取回全部邮箱再分组，不在每个母号里各查一次：母号列表页一次要渲染几百个
+	// 母号，逐个查就是几百次全表解密，实测 456 个母号要 13 秒。
+	grouped := s.store.MailboxesGroupedByAccount()
 	views := make([]IMAPAccountView, 0, len(accounts))
 	for _, account := range accounts {
 		if preset != "" && strings.ToLower(strings.TrimSpace(account.Preset)) != preset {
 			continue
 		}
-		mailboxes := s.store.MailboxesByAccount(account.ID)
-		view := IMAPAccountView{AppleAccount: account, Mailboxes: mailboxes, MailboxCount: len(mailboxes)}
-		for _, mailbox := range mailboxes {
-			if !mailbox.PoolHidden {
-				view.PoolCount++
-			}
-			view.MessageCount += mailbox.ReceiveCount
-		}
-		views = append(views, view)
+		views = append(views, buildIMAPAccountView(account, grouped[account.ID]))
 	}
 	return views
 }
@@ -51,15 +63,7 @@ func (s *Service) FindIMAPAccount(accountID string) (IMAPAccountView, bool) {
 	if !ok || account.ProviderOrDefault() != domain.ProviderIMAP {
 		return IMAPAccountView{}, false
 	}
-	mailboxes := s.store.MailboxesByAccount(account.ID)
-	view := IMAPAccountView{AppleAccount: account, Mailboxes: mailboxes, MailboxCount: len(mailboxes)}
-	for _, mailbox := range mailboxes {
-		if !mailbox.PoolHidden {
-			view.PoolCount++
-		}
-		view.MessageCount += mailbox.ReceiveCount
-	}
-	return view, true
+	return buildIMAPAccountView(account, s.store.MailboxesByAccount(account.ID)), true
 }
 
 // CreateIMAPAccount 建一个 IMAP 母号，并把它的地址一起导入。

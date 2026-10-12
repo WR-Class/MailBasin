@@ -514,7 +514,7 @@ func (s *Store) Mailboxes(query, status, accountID string, poolOnly bool, page, 
 			var data []byte
 			var mailbox domain.Mailbox
 			if rows.Scan(&data) == nil && s.decodeEntity("mailboxes", data, &mailbox) == nil {
-				mailbox.APIToken = ""
+				stripMailboxSecrets(&mailbox)
 				items = append(items, mailbox)
 			}
 		}

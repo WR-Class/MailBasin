@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { AlertCircle, CheckCircle2, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Server, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
@@ -351,6 +351,18 @@ function scheduleRealtimeRefresh(change) {
 onMounted(async () => {
   await load()
   realtimeUnsubscribe = subscribeRealtime(scheduleRealtimeRefresh)
+})
+
+// QQ / 163 / Gmail 三条路由共用这一个组件，Vue 会复用同一个实例：切过去时
+// onMounted 不会再跑一次。不在这里重新加载，页面就会「标题跟着路由变了、
+// 列表和说明还是上一个服务商的」，看起来像串页。
+//
+// 先清空再拉，而不是等新数据回来再替换：否则加载期间页面上还挂着上一个
+// 服务商的列表和限额说明，正是要修的那个现象。
+watch(preset, () => {
+  selected.value = null
+  data.value = { items: [], module: {} }
+  load()
 })
 
 onBeforeUnmount(() => {

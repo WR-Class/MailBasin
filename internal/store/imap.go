@@ -141,8 +141,21 @@ func (s *Store) SetIMAPAccountStatus(accountID, status, message string) error {
 	return s.commitTx(tx, []Change{change})
 }
 
+// stripMailboxSecrets 清掉不出存储层的凭据字段。
+//
+// Mailbox 同时当落库格式和接口返回格式用，所以不能靠 json:"-" 把字段藏起来——
+// 那会把落库一起藏掉。只能在这里清，而且每一个把邮箱交给上层的读路径都要调它：
+// 漏一处就是把使用者的邮箱密码发给浏览器。
+func stripMailboxSecrets(mailbox *domain.Mailbox) {
+	mailbox.APIToken = ""
+	mailbox.IMAPSecret = ""
+}
+
 // MailboxesByAccount 返回某个母号名下的全部邮箱，不受「是否进邮箱池」影响——
 // 母号自己的页面要看得到全部，包括使用者选择不进池的那些。
+//
+// 带 WHERE 的定向查询，而不是「读全表再在 Go 里过滤」：后者每调用一次都要把整张表
+// 解密并反序列化一遍。单个母号看不出差别，母号列表页一次几百个就是几十万次解码。
 func (s *Store) MailboxesByAccount(accountID string) []domain.Mailbox {
 	accountID = strings.TrimSpace(accountID)
 	if accountID == "" {
@@ -150,15 +163,45 @@ func (s *Store) MailboxesByAccount(accountID string) []domain.Mailbox {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []domain.Mailbox
-	_ = s.loadEntities("mailboxes", `json_extract(data_json, '$.created_at')`, &out)
-	filtered := make([]domain.Mailbox, 0, len(out))
-	for index := range out {
-		if strings.TrimSpace(out[index].AccountID) != accountID {
+	rows, err := s.db.Query(`SELECT data_json FROM mailboxes
+		WHERE json_extract(data_json, '$.account_id') = ?
+		ORDER BY json_extract(data_json, '$.created_at'), id`, accountID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]domain.Mailbox, 0)
+	for rows.Next() {
+		var data []byte
+		var mailbox domain.Mailbox
+		if rows.Scan(&data) != nil || s.decodeEntity("mailboxes", data, &mailbox) != nil {
 			continue
 		}
-		out[index].APIToken = ""
-		filtered = append(filtered, out[index])
+		stripMailboxSecrets(&mailbox)
+		out = append(out, mailbox)
 	}
-	return filtered
+	return out
+}
+
+// MailboxesGroupedByAccount 一次取回全部邮箱并按母号分组。
+//
+// 母号列表页要一次渲染几百个母号，逐个母号调一次 MailboxesByAccount 就是 N+1。
+// 这里只读一次、只解密一次，调用方自己按 account_id 取。
+func (s *Store) MailboxesGroupedByAccount() map[string][]domain.Mailbox {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []domain.Mailbox
+	if err := s.loadEntities("mailboxes", `json_extract(data_json, '$.created_at')`, &out); err != nil {
+		return map[string][]domain.Mailbox{}
+	}
+	grouped := make(map[string][]domain.Mailbox, len(out))
+	for index := range out {
+		accountID := strings.TrimSpace(out[index].AccountID)
+		if accountID == "" {
+			continue
+		}
+		stripMailboxSecrets(&out[index])
+		grouped[accountID] = append(grouped[accountID], out[index])
+	}
+	return grouped
 }
