@@ -172,6 +172,8 @@ func (s *Server) routes() {
 	// IMAP 母号（QQ / 163 / 自建）。两个界面共用这组接口，只是 preset 不同。
 	s.mux.HandleFunc("GET /api/imap-accounts", s.protected(s.handleIMAPAccounts))
 	s.mux.HandleFunc("POST /api/imap-accounts", s.protected(s.handleIMAPAccountCreate))
+	// 批量添加多个彼此独立的母号。字面量比 {id} 更具体，所以不会和下面几条抢。
+	s.mux.HandleFunc("POST /api/imap-accounts/batch", s.protected(s.handleIMAPAccountBatch))
 	s.mux.HandleFunc("GET /api/imap-accounts/{id}", s.protected(s.handleIMAPAccount))
 	s.mux.HandleFunc("DELETE /api/imap-accounts/{id}", s.protected(s.handleIMAPAccountDelete))
 	s.mux.HandleFunc("POST /api/imap-accounts/{id}/sync", s.protected(s.handleIMAPAccountSync))

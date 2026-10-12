@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { AlertCircle, CheckCircle2, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Server, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Server, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -24,6 +24,12 @@ const data = ref({ items: [], module: {} })
 const selected = ref(null)
 const createForm = reactive({ email: '', secret: '', host: '', port: 0, username: '', label: '', note: '', raw: '' })
 const addressForm = reactive({ raw: '' })
+// 批量添加：一次建多个彼此独立的母号，每行「邮箱:授权码」。
+// 这与 createForm 里的「名下其它地址」是两件事——那里的多个地址共用一个授权码。
+const showBatch = ref(false)
+const batchForm = reactive({ raw: '', host: '', port: 0 })
+const batchResult = ref(null)
+const batchFileInput = ref(null)
 const { success, error: showError } = useToast()
 const { confirm: confirmAction } = useConfirm()
 let realtimeRefreshTimer
@@ -82,9 +88,46 @@ function parseAddresses(raw) {
   return out
 }
 
+// 与后端 ParseIMAPCredentialLines 保持同一套规则：只在第一个冒号或制表符处切开，
+// 空行和 # 注释跳过，同一邮箱只留第一条。
+function parseCredentialLines(raw) {
+  const seen = new Set()
+  const items = []
+  let skipped = 0
+  for (const line of String(raw || '').replace(/\r\n/g, '\n').split('\n')) {
+    const candidate = line.trim()
+    if (!candidate || candidate.startsWith('#')) continue
+    const index = candidate.search(/[:\t]/)
+    if (index <= 0) {
+      skipped++
+      continue
+    }
+    const email = candidate.slice(0, index).trim().toLowerCase()
+    const secret = compactAppPassword(candidate.slice(index + 1))
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !secret) {
+      skipped++
+      continue
+    }
+    if (seen.has(email)) continue
+    seen.add(email)
+    items.push({ email, secret })
+  }
+  return { items, skipped }
+}
+
+// 只在「去掉空白后正好是 16 位字母数字」时去掉空白：那正是 Google 应用专用密码
+// 的形状（界面把它分成四组显示，抄下来就带空格）。别的形状原样保留，
+// 免得把真的含空格的自建邮箱密码改坏。
+function compactAppPassword(value) {
+  const trimmed = String(value || '').trim()
+  const compacted = trimmed.replace(/\s+/g, '')
+  return /^[A-Za-z0-9]{16}$/.test(compacted) ? compacted : trimmed
+}
+
 const createPreviewCount = computed(() => parseAddresses(createForm.raw).length)
 const addressPreviewCount = computed(() => parseAddresses(addressForm.raw).length)
 const activeHost = computed(() => createForm.host.trim() || moduleInfo.value.host || '')
+const batchPreview = computed(() => parseCredentialLines(batchForm.raw))
 
 async function load(options = {}) {
   const silent = Boolean(options.silent)
@@ -122,6 +165,63 @@ function openCreateDialog() {
 function openAddAddressDialog() {
   addressForm.raw = ''
   showAddAddress.value = true
+}
+
+function openBatchDialog() {
+  batchForm.raw = ''
+  batchForm.host = ''
+  batchForm.port = 0
+  batchResult.value = null
+  showBatch.value = true
+}
+
+// 选文件只是把文件内容读进文本框，不做别的：读进来的东西和粘贴进去的完全一样，
+// 使用者可以在提交前看见并改，而不是点一下就直接导入一批看不见的内容。
+async function onBatchFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  try {
+    batchForm.raw = await file.text()
+    batchResult.value = null
+  } catch (err) {
+    flash(`读不了这个文件：${err.message}`, true)
+  }
+}
+
+async function submitBatch() {
+  if (!batchPreview.value.items.length) {
+    flash('没能从这些内容里解析出任何「邮箱:授权码」', true)
+    return
+  }
+  if (!startBusy('batch')) return
+  try {
+    const payload = await api('/api/imap-accounts/batch', {
+      method: 'POST',
+      body: JSON.stringify({
+        preset: preset.value,
+        host: batchForm.host.trim(),
+        port: Number(batchForm.port) || 0,
+        raw: batchForm.raw,
+      }),
+    })
+    const result = payload.result || {}
+    batchResult.value = result
+    const parts = [`成功 ${result.accounts || 0} 个`]
+    if (result.failed) parts.push(`失败 ${result.failed} 个`)
+    if (payload.skipped_lines) parts.push(`跳过无法解析的 ${payload.skipped_lines} 行`)
+    flash(`${presetLabel.value}批量添加：${parts.join('，')}`, Boolean(result.failed))
+    await load()
+    // 全成功就直接关掉；有失败就留着，让使用者看到是哪几行、为什么。
+    if (!result.failed) {
+      showBatch.value = false
+      batchResult.value = null
+    }
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('batch')
+  }
 }
 
 async function createAccount() {
@@ -266,6 +366,7 @@ onBeforeUnmount(() => {
         <div class="apple-command-title"><span><MailOpen :size="16" /></span><div><h2>{{ presetName }}</h2><p>用标准 IMAP + 客户端授权码收信，名下地址默认只在本页</p></div></div>
         <div class="apple-command-actions">
           <button class="primary-button apple-command-button" title="添加一个邮箱，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加{{ presetLabel }}</button>
+          <button class="secondary-button apple-command-button" title="一次粘贴多个邮箱，每行「邮箱:授权码」，每行都是独立的母号" @click="openBatchDialog"><FileUp :size="14" />批量添加</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该邮箱名下所有地址的收件箱' : '请先选择一个邮箱'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此邮箱</button>
         </div>
       </header>
@@ -367,6 +468,36 @@ onBeforeUnmount(() => {
         <p v-if="moduleInfo.limit" class="apple-dialog-intro"><strong>能挂多少地址：</strong>{{ moduleInfo.limit }}</p>
         <p class="apple-dialog-intro">已解析出 <strong>{{ createPreviewCount }}</strong> 条附加地址（邮箱自己那一条由服务端补上，不占这个数）。授权码等同于邮箱密码，保存时会加密。导入时会先探活一次并如实报告结果。</p>
         <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('create')" @click="showCreate = false">取消</button><button class="primary-button" :disabled="isBusy('create') || !createForm.email.trim() || !createForm.secret.trim()"><LoaderCircle v-if="isBusy('create')" :size="15" class="animate-spin" /><Plus v-else :size="15" />添加{{ presetLabel }}</button></footer>
+      </form>
+    </div>
+
+    <div v-if="showBatch" class="mailbox-dialog-backdrop" role="presentation" @click.self="showBatch = false">
+      <form class="panel mailbox-operation-dialog mailbox-import-dialog" role="dialog" aria-modal="true" aria-labelledby="imap-batch-title" @submit.prevent="submitBatch">
+        <header class="mailbox-dialog-heading"><div><h2 id="imap-batch-title"><FileUp :size="18" />批量添加{{ presetLabel }}</h2><p>一行一个邮箱，每行都是它自己的母号，各有各的授权码。一行失败不影响其它行。</p></div><button type="button" class="icon-button" title="关闭" :disabled="isBusy('batch')" @click="showBatch = false"><X :size="16" /></button></header>
+        <div class="mailbox-dialog-grid">
+          <div class="form-group mailbox-dialog-wide">
+            <span class="form-label">邮箱:授权码（一行一个）</span>
+            <textarea v-model="batchForm.raw" class="field font-mono" rows="8" placeholder="someone@gmail.com:abcdefghijklmnop&#10;another@gmail.com:qrstuvwxyzabcdef"></textarea>
+          </div>
+          <label class="form-group"><span class="form-label">IMAP 服务器</span><input v-model.trim="batchForm.host" class="field" :placeholder="moduleInfo.host || 'imap.example.com'" /></label>
+          <label class="form-group"><span class="form-label">端口</span><input v-model.number="batchForm.port" class="field" type="number" :placeholder="String(moduleInfo.port || 993)" /></label>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="button" class="secondary-button" :disabled="isBusy('batch')" @click="batchFileInput?.click()"><FileUp :size="14" />选择文件</button>
+          <input ref="batchFileInput" type="file" accept=".txt,.csv,.tsv,text/plain" class="hidden" @change="onBatchFile" />
+          <span class="text-[10px]">已解析出 <strong>{{ batchPreview.items.length }}</strong> 个账号<template v-if="batchPreview.skipped">，跳过 <strong>{{ batchPreview.skipped }}</strong> 行</template></span>
+        </div>
+        <p v-if="moduleInfo.hint" class="apple-dialog-intro"><strong>怎么拿授权码：</strong>{{ moduleInfo.hint }}</p>
+        <p class="apple-dialog-intro">每一行都会单独探活一次，所以行数多时要等一会儿；失败的那几行会留在下面，写清是哪一行、为什么。授权码等同于邮箱密码，保存时会加密。</p>
+        <ul v-if="batchResult?.items?.length" class="m-0 grid list-none gap-1.5 p-0">
+          <li v-for="item in batchResult.items" :key="item.email" class="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10px] dark:border-slate-700 dark:bg-slate-900/40">
+            <CheckCircle2 v-if="item.ok" :size="13" class="mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <AlertCircle v-else :size="13" class="mt-0.5 shrink-0 text-rose-600 dark:text-rose-400" />
+            <span class="font-mono">{{ item.email }}</span>
+            <span class="text-slate-500 dark:text-slate-400">{{ item.ok ? '已添加' : item.reason }}</span>
+          </li>
+        </ul>
+        <footer class="mailbox-dialog-actions"><button type="button" class="secondary-button" :disabled="isBusy('batch')" @click="showBatch = false">取消</button><button class="primary-button" :disabled="isBusy('batch') || !batchPreview.items.length"><LoaderCircle v-if="isBusy('batch')" :size="15" class="animate-spin" /><FileUp v-else :size="15" />添加 {{ batchPreview.items.length }} 个账号</button></footer>
       </form>
     </div>
 

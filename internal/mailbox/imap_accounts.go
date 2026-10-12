@@ -126,6 +126,68 @@ func (s *Service) CreateIMAPAccount(preset, email, secret, host string, port int
 	return view, result, nil
 }
 
+// IMAPAccountBatchItem 是批量添加里一行的结果。
+// 逐行报结果，而不是只回一个总数：批量里最需要知道的就是「哪一行错了」。
+type IMAPAccountBatchItem struct {
+	Email   string `json:"email"`
+	OK      bool   `json:"ok"`
+	Created int    `json:"created"`
+	Failed  int    `json:"failed"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// IMAPAccountBatchResult 汇总一次批量添加。
+type IMAPAccountBatchResult struct {
+	Accounts int                    `json:"accounts"`
+	Failed   int                    `json:"failed"`
+	Items    []IMAPAccountBatchItem `json:"items"`
+}
+
+// ImportIMAPAccounts 一次建多个彼此独立的 IMAP 母号。
+//
+// 逐行独立建，一行失败不影响其它行：批量里最不该发生的事，就是第 3 行的授权码
+// 写错，把第 4 到第 6 行一起丢掉。每行都会真的探活一次，所以耗时就等于行数乘以
+// 一次登录的时间——服务端的写超时是 30 分钟，放得下。
+func (s *Service) ImportIMAPAccounts(preset, host string, port int, inputs []IMAPAccountInput) IMAPAccountBatchResult {
+	result := IMAPAccountBatchResult{Items: make([]IMAPAccountBatchItem, 0, len(inputs))}
+	for _, input := range inputs {
+		item := IMAPAccountBatchItem{Email: input.Email}
+		// 用户名、标签、备注一律留空：批量里每一行就是它自己的母号，
+		// 标签由 CreateIMAPAccount 回落到邮箱地址本身。
+		_, importResult, err := s.CreateIMAPAccount(preset, input.Email, input.Secret, host, port, "", "", "", nil)
+		switch {
+		case err != nil:
+			item.Reason = err.Error()
+		default:
+			item.Created = importResult.Created
+			item.Failed = importResult.Failed
+			item.OK = importResult.Failed == 0
+			if !item.OK {
+				item.Reason = firstIMAPFailureReason(importResult)
+			}
+		}
+		if item.OK {
+			result.Accounts++
+		} else {
+			result.Failed++
+		}
+		result.Items = append(result.Items, item)
+	}
+	return result
+}
+
+// firstIMAPFailureReason 从导入结果里挑出第一条失败原因。
+// 母号自己的地址永远排在地址列表第一条，所以这里拿到的通常就是
+// 「这个授权码连不上」这一条，正是使用者需要看到的那句话。
+func firstIMAPFailureReason(result IMAPMailboxImportResult) string {
+	for _, item := range result.Items {
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			return reason
+		}
+	}
+	return "地址导入失败，请检查授权码与服务器地址"
+}
+
 // AddIMAPAccountAddresses 往已有母号里追加地址。
 // 凭据沿用母号自己保存的那一份，不需要使用者再填一次授权码。
 func (s *Service) AddIMAPAccountAddresses(accountID string, inputs []IMAPMailboxInput) (IMAPMailboxImportResult, error) {

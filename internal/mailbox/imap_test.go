@@ -96,6 +96,110 @@ func TestParseIMAPMailboxLinesCountsSkipped(t *testing.T) {
 	}
 }
 
+// 批量添加最常见的形态：一行一个「邮箱:授权码」，每行是一个独立的母号。
+func TestParseIMAPCredentialLinesAcceptsEmailColonSecret(t *testing.T) {
+	items, skipped := ParseIMAPCredentialLines(
+		"first@example.com:aaaaaaaaaaaaaaaa\nsecond@example.com:bbbbbbbbbbbbbbbb\n")
+	if len(items) != 2 || skipped != 0 {
+		t.Fatalf("应解析出 2 条且无跳过，实际 %d 条 / %d 跳过", len(items), skipped)
+	}
+	if items[0].Email != "first@example.com" || items[0].Secret != "aaaaaaaaaaaaaaaa" {
+		t.Fatalf("第一条不正确：%+v", items[0])
+	}
+	if items[1].Secret != "bbbbbbbbbbbbbbbb" {
+		t.Fatalf("第二条的授权码不正确：%+v", items[1])
+	}
+}
+
+// 只在第一个分隔符处切开。授权码自己含冒号时，按所有分隔符切会把密码截断，
+// 而截断后的密码看起来只是一次登录失败，使用者根本查不出原因。
+func TestParseIMAPCredentialLinesSplitsOnTheFirstSeparatorOnly(t *testing.T) {
+	items, _ := ParseIMAPCredentialLines("someone@example.com:aa:bb:cc")
+	if len(items) != 1 {
+		t.Fatalf("应解析出 1 条，实际 %d 条", len(items))
+	}
+	if items[0].Secret != "aa:bb:cc" {
+		t.Fatalf("授权码应保留后面的冒号，实际 %q", items[0].Secret)
+	}
+}
+
+// 制表符也算分隔符：从表格里复制出来的就是这种形状。
+func TestParseIMAPCredentialLinesAcceptsTabSeparator(t *testing.T) {
+	items, _ := ParseIMAPCredentialLines("someone@example.com\tsupersecret")
+	if len(items) != 1 || items[0].Secret != "supersecret" {
+		t.Fatalf("制表符分隔应能解析，实际 %+v", items)
+	}
+}
+
+// Google 把 16 位应用专用密码分成四组显示，照着界面抄下来就带空格。
+// 留着空格会让每一行都登录失败，所以这种形状必须把空格去掉。
+func TestParseIMAPCredentialLinesCompactsGoogleAppPasswordSpaces(t *testing.T) {
+	items, _ := ParseIMAPCredentialLines("someone@gmail.com:abcd efgh ijkl mnop")
+	if len(items) != 1 {
+		t.Fatalf("应解析出 1 条，实际 %d 条", len(items))
+	}
+	if items[0].Secret != "abcdefghijklmnop" {
+		t.Fatalf("应用专用密码里的空格应被去掉，实际 %q", items[0].Secret)
+	}
+}
+
+// 但只有「去掉空白后正好是 16 位字母数字」才动。自建邮箱的密码真的可以含空格，
+// 把它改坏了使用者没有任何办法绕过——这条路必须留着。
+func TestParseIMAPCredentialLinesKeepsASpacedPasswordThatIsNotAppPasswordShaped(t *testing.T) {
+	items, _ := ParseIMAPCredentialLines("someone@selfhosted.example:my pass word")
+	if len(items) != 1 {
+		t.Fatalf("应解析出 1 条，实际 %d 条", len(items))
+	}
+	if items[0].Secret != "my pass word" {
+		t.Fatalf("不是应用专用密码的形状就不该去掉空格，实际 %q", items[0].Secret)
+	}
+}
+
+// 空行和注释是排版，不计入跳过——把空行算进去会报出「跳过 8 行」这种吓人的数字。
+func TestParseIMAPCredentialLinesIgnoresBlanksAndComments(t *testing.T) {
+	items, skipped := ParseIMAPCredentialLines(
+		"\n# 第一批\na@example.com:aaaaaaaaaaaaaaaa\n\n# 第二批\nb@example.com:bbbbbbbbbbbbbbbb\n\n")
+	if len(items) != 2 {
+		t.Fatalf("应解析出 2 条，实际 %d 条：%+v", len(items), items)
+	}
+	if skipped != 0 {
+		t.Fatalf("空行和注释不该计入跳过，实际跳过 %d 行", skipped)
+	}
+}
+
+// 真正没法用的行要如实计入跳过，不能悄悄丢掉：漏报会让使用者以为六行都进去了。
+func TestParseIMAPCredentialLinesCountsSkipped(t *testing.T) {
+	items, skipped := ParseIMAPCredentialLines(
+		"a@example.com:aaaaaaaaaaaaaaaa\n" + // 正常
+			"没有分隔符的一行\n" + // 没有分隔符
+			":只有授权码\n" + // 分隔符前面是空的
+			"不是地址:aaaaaaaaaaaaaaaa\n" + // 邮箱不合法
+			"b@example.com:\n" + // 授权码是空的
+			"c@example.com:cccccccccccccccc\n") // 正常
+	if len(items) != 2 {
+		t.Fatalf("应解析出 2 条，实际 %d 条：%+v", len(items), items)
+	}
+	if skipped != 4 {
+		t.Fatalf("应跳过 4 行，实际跳过 %d 行", skipped)
+	}
+}
+
+// 同一个邮箱出现两次只留第一条：重复导入同一个母号是更新不是新建，
+// 但把两行都发下去会让界面显示两次探活，白白多连一次服务器。
+func TestParseIMAPCredentialLinesDeduplicatesByEmail(t *testing.T) {
+	items, _ := ParseIMAPCredentialLines(
+		"A@Example.com:aaaaaaaaaaaaaaaa\na@example.com:bbbbbbbbbbbbbbbb")
+	if len(items) != 1 {
+		t.Fatalf("重复邮箱应只留一条，实际 %d 条：%+v", len(items), items)
+	}
+	if items[0].Email != "a@example.com" {
+		t.Fatalf("邮箱应归一为小写，实际 %q", items[0].Email)
+	}
+	if items[0].Secret != "aaaaaaaaaaaaaaaa" {
+		t.Fatalf("应保留第一条的授权码，实际 %q", items[0].Secret)
+	}
+}
+
 // 新增的 provider 必须能穿过归一化。
 // 若 NormalizeProvider 不认识 imap，所有 IMAP 邮箱会被静默改判成 iCloud，
 // 然后进入按账号分组的同步路径——那条路没有账号可以认证。

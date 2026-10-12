@@ -94,6 +94,39 @@ func (s *Server) handleIMAPAccountCreate(w http.ResponseWriter, r *http.Request)
 	}})
 }
 
+// handleIMAPAccountBatch 一次添加多个彼此独立的 IMAP 母号。
+//
+// 每行一个「邮箱:授权码」。与上面的单个创建不同，这里每一行都建自己的母号，
+// 逐行独立、逐行报结果——一行失败不影响其它行。
+func (s *Server) handleIMAPAccountBatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Preset string                              `json:"preset"`
+		Host   string                              `json:"host"`
+		Port   int                                 `json:"port"`
+		Raw    string                              `json:"raw"`
+		Items  []mailboxservice.IMAPAccountInput   `json:"items"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	items := body.Items
+	skipped := 0
+	if strings.TrimSpace(body.Raw) != "" {
+		parsed, dropped := mailboxservice.ParseIMAPCredentialLines(body.Raw)
+		items = append(items, parsed...)
+		skipped += dropped
+	}
+	if len(items) == 0 {
+		writeError(w, http.StatusBadRequest, "no_items", "没有解析出任何「邮箱:授权码」，请检查粘贴内容")
+		return
+	}
+	result := s.mailbox.ImportIMAPAccounts(body.Preset, body.Host, body.Port, items)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+		"result": result, "skipped_lines": skipped,
+	}})
+}
+
 // handleIMAPAccountAddresses 往已有母号里追加地址。
 // 凭据沿用母号自己保存的那一份，不需要使用者再填一次授权码。
 func (s *Server) handleIMAPAccountAddresses(w http.ResponseWriter, r *http.Request) {

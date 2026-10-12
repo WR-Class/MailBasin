@@ -293,6 +293,81 @@ func ParseIMAPMailboxLines(raw string) ([]IMAPMailboxInput, int) {
 	return out, skipped
 }
 
+// IMAPAccountInput 是批量添加里的一行：一个母号邮箱，和它自己的授权码。
+//
+// 与 IMAPMailboxInput 的区别在凭据：那里的多个地址共用一个授权码、属于同一个母号；
+// 这里的每一行都是一个独立的母号。两种形状不能混用——把六个 Gmail 的授权码
+// 当成一个母号的六个别名导入，只有第一个能收到信。
+type IMAPAccountInput struct {
+	Email  string `json:"email"`
+	Secret string `json:"secret"`
+}
+
+// ParseIMAPCredentialLines 解析「邮箱:授权码」形式的批量输入。
+//
+// 只在第一个冒号或制表符处切开，后面的分隔符一律算授权码的一部分——
+// 按所有分隔符切会把含冒号的密码截断，而截断后的密码看起来只是个登录失败。
+// 空行和以 # 开头的注释行跳过，不计入跳过行数；同一邮箱重复出现只留第一条。
+func ParseIMAPCredentialLines(raw string) ([]IMAPAccountInput, int) {
+	var out []IMAPAccountInput
+	skipped := 0
+	seen := make(map[string]struct{})
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		candidate := strings.TrimSpace(line)
+		if candidate == "" || strings.HasPrefix(candidate, "#") {
+			continue
+		}
+		index := strings.IndexAny(candidate, ":\t")
+		if index <= 0 {
+			// 没有分隔符，或分隔符前面是空的（比如开头就是一个冒号）。
+			skipped++
+			continue
+		}
+		email, err := normalizeExternalEmail(candidate[:index])
+		if err != nil {
+			skipped++
+			continue
+		}
+		secret := normalizeCredentialSecret(candidate[index+1:])
+		if secret == "" {
+			skipped++
+			continue
+		}
+		if _, dup := seen[email]; dup {
+			continue
+		}
+		seen[email] = struct{}{}
+		out = append(out, IMAPAccountInput{Email: email, Secret: secret})
+	}
+	return out, skipped
+}
+
+// normalizeCredentialSecret 处理授权码里的空白。
+//
+// Google 把 16 位应用专用密码分成四组显示（xxxx xxxx xxxx xxxx），照着界面抄下来
+// 就带空格，留着空格会让每一行都登录失败。但只在「去掉空白后正好是 16 位字母数字」
+// 时才去掉——那正是应用专用密码的形状。换成别的形状就原样保留，免得把一个真的
+// 含空格的自建邮箱密码改坏；改坏了使用者还没有别的办法绕过。
+func normalizeCredentialSecret(secret string) string {
+	trimmed := strings.TrimSpace(secret)
+	compacted := strings.Join(strings.Fields(trimmed), "")
+	if len(compacted) == 16 && isAlphanumeric(compacted) {
+		return compacted
+	}
+	return trimmed
+}
+
+func isAlphanumeric(value string) bool {
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // normalizeIMAPHost 只做最基本的形状校验：主机名或 IP，不能带协议和路径。
 // 真正的可达性由导入时的探活回答，这里不假装能判断。
 func normalizeIMAPHost(value string) (string, error) {
