@@ -167,6 +167,32 @@ function mailboxProvider(mailbox) {
   return account?.provider || mailbox?.provider || 'icloud'
 }
 
+// 彻底删除是 Apple 专有动作：它要 iCloud 登录态，还要在 Apple 服务器上删掉那个隐私邮箱。
+// 对 Microsoft / Google / external 的记录调用它，只会在登录态那一步报错，什么都删不掉。
+function supportsRemoteDelete(mailbox) {
+  if (!mailbox) return false
+  return mailboxProvider(mailbox) === 'icloud'
+}
+
+// 主地址那条池子记录删不得：Microsoft 走 Graph、Google 走 Gmail，两边都是按收件人字段
+// 去池子里精确匹配的（protocol/graph_client.go 用池子记录建 byEmail 表）。少了这条记录，
+// 寄到主地址的信会被算成「未匹配」直接丢掉——主信箱静默停收。
+function isPrimaryMailbox(mailbox) {
+  return String(mailbox?.remote_origin || '').toLowerCase().endsWith('_primary')
+}
+
+// 「清理与删除」区块的说明文字必须和那一格实际给出的按钮一致：主地址连「只删本地」
+// 都没有，就不能拿「只删本地会先清空本地邮件」去描述它。
+function deleteSectionNote(mailbox) {
+  if (isPrimaryMailbox(mailbox)) {
+    return '主地址就是这一行账号本身。删掉这条池子记录后，寄到主地址的信会因为匹配不到任何本地地址而被丢弃，所以这里不提供删除。'
+  }
+  if (supportsRemoteDelete(mailbox)) {
+    return '彻底删除会精确清理本地已同步的远端邮件并清空所属账号废纸篓，再删除 Apple 隐私邮箱及本地记录。'
+  }
+  return '这类邮箱没有 Apple 远端可清理：「只删本地」会先清空本地邮件，再删掉本地邮箱记录。'
+}
+
 function statusClass(value) {
   if (value === 'available' || value === 'active') return 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-300'
   if (value === 'reserved') return 'bg-violet-50 text-violet-600 dark:bg-violet-950/40 dark:text-violet-300'
@@ -1521,8 +1547,8 @@ function removeMailbox(localOnly) {
   return deleteMailbox(selected.value, localOnly)
 }
 
-async function removeMailboxFromRow(mailbox) {
-  return deleteMailbox(mailbox, false)
+async function removeMailboxFromRow(mailbox, localOnly = false) {
+  return deleteMailbox(mailbox, localOnly)
 }
 
 function goToPage(targetPage) {
@@ -1629,7 +1655,9 @@ onBeforeUnmount(() => {
                   <button class="mailbox-action-button mailbox-action-sync" :class="{ 'mailbox-action-sync-selected': rowBusyAction(mailbox.id) === 'sync' }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" :title="mailboxMessageSyncHint" @click.stop="quickSyncMailbox(mailbox)"><LoaderCircle v-if="rowBusyAction(mailbox.id) === 'sync'" :size="12" class="animate-spin" /><RefreshCw v-else :size="12" />同步</button>
                   <button class="mailbox-action-button mailbox-action-code" :class="{ 'mailbox-action-code-selected': rowBusyAction(mailbox.id) === 'code' || (codeDialogOpen && codeMailbox?.id === mailbox.id) }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" title="获取该邮箱的最新验证码" @click.stop="quickGetCode(mailbox)"><LoaderCircle v-if="codeBusyVisible === `code-row:${mailbox.id}`" :size="12" class="animate-spin" /><KeyRound v-else :size="12" />取码</button>
                   <button class="mailbox-action-button mailbox-action-detail" :class="{ 'mailbox-action-detail-selected': selected?.id === mailbox.id }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" title="查看邮箱详情" @click.stop="openMailbox(mailbox)"><LoaderCircle v-if="rowBusyAction(mailbox.id) === 'detail'" :size="12" class="animate-spin" /><MailOpen v-else :size="12" />详情</button>
-                  <button class="mailbox-action-button mailbox-action-delete" :class="{ 'mailbox-action-delete-selected': isMailboxDeleteBusy(mailbox.id) }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" :title="isMailboxDeleting(mailbox.id) ? '正在清理已同步邮件并删除隐私邮箱' : isMailboxDeleteQueued(mailbox.id) ? '已加入彻底删除队列' : '清理已同步的远端邮件后彻底删除隐私邮箱'" @click.stop="removeMailboxFromRow(mailbox)"><LoaderCircle v-if="isMailboxDeleting(mailbox.id)" :size="12" class="animate-spin" /><LoaderCircle v-else-if="isMailboxDeleteQueued(mailbox.id)" :size="12" class="animate-spin" /><Trash2 v-else :size="12" />{{ isMailboxDeleting(mailbox.id) ? '删除中' : isMailboxDeleteQueued(mailbox.id) ? '排队中' : '删除' }}</button>
+                  <span v-if="isPrimaryMailbox(mailbox)" class="inline-flex items-center px-1.5 py-1 text-[10px] font-bold text-slate-400 dark:text-slate-500" title="主地址就是这一行账号本身。删掉这条池子记录后，寄到主地址的信会因为匹配不到任何本地地址而被丢弃，所以这里不提供删除。">主地址</span>
+                  <button v-else-if="supportsRemoteDelete(mailbox)" class="mailbox-action-button mailbox-action-delete" :class="{ 'mailbox-action-delete-selected': isMailboxDeleteBusy(mailbox.id) }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" :title="isMailboxDeleting(mailbox.id) ? '正在清理已同步邮件并删除隐私邮箱' : isMailboxDeleteQueued(mailbox.id) ? '已加入彻底删除队列' : '清理已同步的远端邮件后彻底删除隐私邮箱'" @click.stop="removeMailboxFromRow(mailbox)"><LoaderCircle v-if="isMailboxDeleting(mailbox.id)" :size="12" class="animate-spin" /><LoaderCircle v-else-if="isMailboxDeleteQueued(mailbox.id)" :size="12" class="animate-spin" /><Trash2 v-else :size="12" />{{ isMailboxDeleting(mailbox.id) ? '删除中' : isMailboxDeleteQueued(mailbox.id) ? '排队中' : '删除' }}</button>
+                  <button v-else class="mailbox-action-button mailbox-action-delete" :class="{ 'mailbox-action-delete-selected': isMailboxDeleteBusy(mailbox.id) }" :disabled="Boolean(rowBusyAction(mailbox.id)) || isMailboxDeleteBusy(mailbox.id)" :title="isMailboxDeleting(mailbox.id) ? '正在删除本地记录' : isMailboxDeleteQueued(mailbox.id) ? '已加入删除队列' : '只删除本地记录和已同步邮件。这类邮箱没有 Apple 远端可清理，所以不做彻底删除。'" @click.stop="removeMailboxFromRow(mailbox, true)"><LoaderCircle v-if="isMailboxDeleting(mailbox.id)" :size="12" class="animate-spin" /><LoaderCircle v-else-if="isMailboxDeleteQueued(mailbox.id)" :size="12" class="animate-spin" /><Trash2 v-else :size="12" />{{ isMailboxDeleting(mailbox.id) ? '删除中' : isMailboxDeleteQueued(mailbox.id) ? '排队中' : '只删本地' }}</button>
                 </div>
               </td>
             </tr>
@@ -1756,12 +1784,13 @@ onBeforeUnmount(() => {
           </section>
 
           <section class="rounded-xl border border-rose-200/70 bg-white p-3 dark:border-rose-950 dark:bg-slate-900">
-            <div class="mb-2.5"><h3 class="text-xs font-black text-slate-700 dark:text-slate-200">清理与删除</h3><p class="mt-0.5 text-[10px] leading-4 text-slate-400">彻底删除会精确清理本地已同步的远端邮件并清空所属账号废纸篓，再删除 Apple 隐私邮箱及本地记录。</p></div>
+            <div class="mb-2.5"><h3 class="text-xs font-black text-slate-700 dark:text-slate-200">清理与删除</h3><p class="mt-0.5 text-[10px] leading-4 text-slate-400">{{ deleteSectionNote(selected) }}</p></div>
             <div class="detail-setting-grid"><label class="detail-setting-row"><span><strong>移动已同步邮件</strong><small>移入 Apple 废纸篓</small></span><input v-model="remoteClean.move_synced" class="detail-switch" type="checkbox" /></label><label class="detail-setting-row"><span><strong>清空整个废纸篓</strong><small>彻底清除该 Apple 账号的废纸篓邮件</small></span><input v-model="remoteClean.empty_trash" class="detail-switch" type="checkbox" /></label></div>
             <div class="mt-2 grid gap-2 sm:grid-cols-2">
-              <button class="detail-button detail-button-secondary sm:col-span-2" :disabled="isBusy('clean') || isMailboxDeleteBusy(selected.id) || (!remoteClean.move_synced && !remoteClean.empty_trash)" @click="cleanRemote"><LoaderCircle v-if="isBusy('clean')" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />清理 Apple 远端邮件</button>
-              <button class="detail-button detail-button-danger" :disabled="isMailboxDeleteBusy(selected.id)" @click="removeMailbox(false)"><LoaderCircle v-if="isMailboxDeleteBusy(selected.id)" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />{{ isMailboxDeleting(selected.id) ? '删除中' : isMailboxDeleteQueued(selected.id) ? '排队中' : '彻底删除' }}</button>
-              <button class="detail-button detail-button-ghost" :disabled="isMailboxDeleteBusy(selected.id)" @click="removeMailbox(true)"><LoaderCircle v-if="isMailboxDeleteBusy(selected.id)" :size="14" class="animate-spin" /><ShieldX v-else :size="14" />{{ isMailboxDeleting(selected.id) ? '删除中' : isMailboxDeleteQueued(selected.id) ? '排队中' : '只删本地' }}</button>
+              <button v-if="supportsRemoteDelete(selected)" class="detail-button detail-button-secondary sm:col-span-2" :disabled="isBusy('clean') || isMailboxDeleteBusy(selected.id) || (!remoteClean.move_synced && !remoteClean.empty_trash)" @click="cleanRemote"><LoaderCircle v-if="isBusy('clean')" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />清理 Apple 远端邮件</button>
+              <button v-if="supportsRemoteDelete(selected)" class="detail-button detail-button-danger" :disabled="isMailboxDeleteBusy(selected.id)" @click="removeMailbox(false)"><LoaderCircle v-if="isMailboxDeleteBusy(selected.id)" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />{{ isMailboxDeleting(selected.id) ? '删除中' : isMailboxDeleteQueued(selected.id) ? '排队中' : '彻底删除' }}</button>
+              <button v-if="!isPrimaryMailbox(selected)" class="detail-button detail-button-ghost" :class="{ 'sm:col-span-2': !supportsRemoteDelete(selected) }" :disabled="isMailboxDeleteBusy(selected.id)" @click="removeMailbox(true)"><LoaderCircle v-if="isMailboxDeleteBusy(selected.id)" :size="14" class="animate-spin" /><ShieldX v-else :size="14" />{{ isMailboxDeleting(selected.id) ? '删除中' : isMailboxDeleteQueued(selected.id) ? '排队中' : '只删本地' }}</button>
+              <p v-else class="sm:col-span-2 text-[10px] leading-4 text-slate-400">主地址就是这一行账号本身。删掉这条池子记录后，寄到主地址的信会因为匹配不到任何本地地址而被丢弃，所以这里不提供删除。</p>
             </div>
           </section>
         </div>
