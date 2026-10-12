@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { AlertCircle, CheckCircle2, ClipboardCopy, Cloud, ExternalLink, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, ChevronRight, ClipboardCopy, Cloud, ExternalLink, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Save, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -14,6 +14,13 @@ const showAddAlias = ref(false)
 const data = ref({ items: [], module: {}, module_ready: true })
 const selected = ref(null)
 const aliases = ref([])
+// 展开块里的三块分区默认都收起：别名一多，平铺着翻到最下面那块要很久。
+const openSections = reactive({ auth: false, aliases: false })
+// 授权信息就地编辑。留空＝回落到内置公共客户端，语义与系统设置页一致。
+const authForm = reactive({ client_id: '', tenant: '', watcher_enabled: true })
+// 「别名邮箱」列的是本机邮箱池里属于这个账号的记录，不是 Graph 的远端列表：
+// 能在这里删掉的必须正好是池子里那一条，否则会出现「删了又冒出来」。
+const poolMailboxes = ref([])
 const login = reactive({ login_id: '', user_code: '', verification_uri: '', message: '', expires_at: '', status: 'idle' })
 const aliasForm = reactive({ email: '', label: '', note: '' })
 
@@ -96,12 +103,14 @@ async function load(options = {}) {
   if (!silent) loading.value = true
   try {
     data.value = await api('/api/microsoft-accounts')
+    applyAuthForm()
     if (selected.value) {
       const current = (data.value.items || []).find((item) => item.id === selected.value.id)
       if (current) selected.value = { ...selected.value, ...current }
       else {
         selected.value = null
         aliases.value = []
+        poolMailboxes.value = []
       }
     }
   } catch (err) {
@@ -238,6 +247,7 @@ async function toggleAccount(account) {
   if (selected.value?.id === account.id) {
     selected.value = null
     aliases.value = []
+    poolMailboxes.value = []
     return
   }
   await selectAccount(account)
@@ -250,10 +260,103 @@ async function selectAccount(account) {
     const result = await api(`/api/microsoft-accounts/${account.id}`)
     selected.value = result.account
     aliases.value = (result.mailboxes || []).map((item) => item.email)
+    poolMailboxes.value = result.mailboxes || []
   } catch (err) {
     flash(err.message, true)
   } finally {
     finishBusy(busyKey)
+  }
+}
+
+// 只刷新邮箱池那一段。删掉别名或导入之后调它，不用重拉整个账号详情。
+async function refreshPool() {
+  if (!selected.value) {
+    poolMailboxes.value = []
+    return
+  }
+  try {
+    const result = await api(`/api/microsoft-accounts/${selected.value.id}`)
+    poolMailboxes.value = result.mailboxes || []
+  } catch {
+    // 刷新失败就保持原样，不要因此把已经显示出来的列表清空。
+  }
+}
+
+function primaryAddress() {
+  return String(selected.value?.email || selected.value?.apple_id || '').toLowerCase()
+}
+
+function isPrimaryMailbox(mailbox) {
+  return String(mailbox.email || '').toLowerCase() === primaryAddress()
+}
+
+// 删除别名＝把这条记录从本机邮箱池里拿掉，连同它收到的邮件。
+// Graph 没有删除别名的接口，微软账号上的地址本身删不掉——所以确认框里
+// 必须把这一点说清楚，否则会让人以为连微软那边一起删了。
+async function deleteAlias(mailbox) {
+  const busyKey = `alias-delete:${mailbox.id}`
+  if (!startBusy(busyKey)) return
+  try {
+    let count = -1
+    try {
+      const result = await api(`/api/mailboxes/${encodeURIComponent(mailbox.id)}/messages`)
+      count = (result.items || []).length
+    } catch {
+      // 数不出来不该挡住删除，确认框里如实说数不出来。
+    }
+    const mailLine = count < 0 ? '它收到的邮件' : `它收到的 ${count} 封邮件`
+    const confirmed = await confirmAction({
+      title: '删除别名',
+      message: `确定删除“${mailbox.email}”吗？\n\n会把它从本机邮箱池中移除，并一并删除${mailLine}。\n\n注意：这只是本机记录，Microsoft 账号上的这个别名本身不会被删除；再点一次「发现别名」还会把它读回来。`,
+      confirmText: '删除',
+      tone: 'danger',
+    })
+    if (!confirmed) return
+    await api(`/api/mailboxes/${encodeURIComponent(mailbox.id)}?local_only=true`, { method: 'DELETE' })
+    flash(`已从邮箱池删除 ${mailbox.email}`)
+    await refreshPool()
+    await load({ silent: true })
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy(busyKey)
+  }
+}
+
+// 授权信息表单跟随服务端返回的「生效值」：没填过时输入框留空、把内置兜底值
+// 当占位符，否则第一次保存就会把兜底值写死成用户自己的选择。
+//
+// 只在首次加载和保存之后回填。load() 也会被实时事件触发，每次都回填会把
+// 使用者正在输入的内容冲掉。
+let authFormLoaded = false
+
+function applyAuthForm(force = false) {
+  if (authFormLoaded && !force) return
+  const info = data.value.module || {}
+  authForm.client_id = info.using_default_client ? '' : String(info.client_id || '')
+  authForm.tenant = String(info.tenant || '') === 'common' ? '' : String(info.tenant || '')
+  authForm.watcher_enabled = info.watcher_enabled !== false
+  authFormLoaded = true
+}
+
+async function saveAuth() {
+  if (!startBusy('save-auth')) return
+  try {
+    await api('/api/microsoft/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        client_id: authForm.client_id,
+        tenant: authForm.tenant,
+        watcher_enabled: authForm.watcher_enabled !== false,
+      }),
+    })
+    await load({ silent: true })
+    applyAuthForm(true)
+    flash('Microsoft 授权信息已保存')
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('save-auth')
   }
 }
 
@@ -472,41 +575,89 @@ onBeforeUnmount(() => {
                 <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
                   <td colspan="4" class="apple-account-expand-cell">
                     <div class="apple-account-expand-body">
-            <header class="apple-detail-heading"><div><span>所选 Microsoft 账号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button></header>
-            <div class="ms-detail-scroll">
-            <div class="apple-state-list">
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
-                <span class="apple-state-copy"><strong>OAuth2 授权</strong><small>访问令牌按需自动续期，refresh_token 加密存储</small></span>
-                <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
-              </article>
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Cloud :size="14" /></span>
-                <span class="apple-state-copy"><strong>Microsoft Graph</strong><small>读取收件箱并按收件人分发到各个别名</small></span>
-                <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">已启用</span>
-              </article>
-            </div>
+                      <!-- ① 授权信息：折叠 + 就地可改。应用凭据不再在系统设置里重复展示。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.auth" @click="openSections.auth = !openSections.auth">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><ShieldCheck :size="15" />授权信息</strong>
+                              <small>{{ selected.label || selected.apple_id }} · 客户端与租户可在这里改</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.auth" class="detail-section-body">
+                          <div class="apple-state-list">
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
+                              <span class="apple-state-copy"><strong>OAuth2 授权</strong><small>访问令牌按需自动续期，refresh_token 加密存储</small></span>
+                              <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
+                            </article>
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Cloud :size="14" /></span>
+                              <span class="apple-state-copy"><strong>Microsoft Graph</strong><small>读取收件箱并按收件人分发到各个别名</small></span>
+                              <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">已启用</span>
+                            </article>
+                          </div>
+                          <div class="detail-field-grid">
+                            <label class="form-group">
+                              <span class="form-label">客户端 ID</span>
+                              <input v-model.trim="authForm.client_id" class="field font-mono" type="text" autocomplete="off" maxlength="120" placeholder="留空使用内置公共客户端" />
+                              <small class="form-help">留空则用内置的微软公共客户端 ID；长期使用建议填自己在 Azure 注册的应用。</small>
+                            </label>
+                            <label class="form-group">
+                              <span class="form-label">租户</span>
+                              <input v-model.trim="authForm.tenant" class="field font-mono" type="text" autocomplete="off" maxlength="120" placeholder="common" />
+                              <small class="form-help">个人 Microsoft 账号（outlook.com / hotmail.com）保持 <code>common</code>。</small>
+                            </label>
+                            <label class="settings-capability-option">
+                              <span class="settings-capability-option-icon"><Server :size="16" /></span>
+                              <span class="settings-capability-option-copy"><strong>Graph 后台收信监听</strong><small>按收件人把 Graph 返回的整箱邮件分发到对应别名，默认 15 秒一轮，失败后退避。</small></span>
+                              <input v-model="authForm.watcher_enabled" class="detail-switch" type="checkbox" />
+                            </label>
+                          </div>
+                          <dl class="apple-meta-list">
+                            <div><dt>别名上限</dt><dd>单账号 10 个（Microsoft 限制）</dd></div>
+                          </dl>
+                          <p v-if="moduleInfo.using_default_client" class="apple-detail-hint"><AlertCircle :size="13" />当前使用内置公共客户端，填入自己的 Azure 应用 ID 可提高稳定性。</p>
+                          <div class="detail-section-foot">
+                            <button type="button" class="secondary-button" :disabled="isBusy('save-auth')" @click="saveAuth"><LoaderCircle v-if="isBusy('save-auth')" :size="13" class="animate-spin" /><Save v-else :size="13" />{{ isBusy('save-auth') ? '保存中' : '保存授权信息' }}</button>
+                          </div>
+                        </div>
+                      </section>
 
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>别名邮箱</h3><p>Graph 不提供创建接口，请在 account.microsoft.com 手工创建后再导入</p></div><button class="secondary-button apple-check-button" @click="openAddAliasDialog"><Plus :size="13" />手工添加</button></header>
-              <div v-if="!aliases.length" class="apple-state-empty">还没有已导入的别名，点击“发现别名”或“手工添加”。</div>
-              <ul v-else class="apple-alias-list">
-                <li v-for="alias in aliases" :key="alias"><MailOpen :size="13" /><span class="font-mono">{{ alias }}</span></li>
-              </ul>
-            </div>
+                      <!-- ② 邮件与验证码：默认折叠，内容由 AccountInboxPanel 自己渲染。 -->
+                      <AccountInboxPanel collapsible :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
 
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>授权信息</h3><p>客户端与租户来自系统设置或 config.json</p></div></header>
-              <dl class="apple-meta-list">
-                <div><dt>租户</dt><dd class="font-mono">{{ moduleInfo.tenant || 'common' }}</dd></div>
-                <div><dt>客户端 ID</dt><dd class="font-mono">{{ moduleInfo.client_id || '—' }}</dd></div>
-                <div><dt>别名上限</dt><dd>单账号 10 个（Microsoft 限制）</dd></div>
-                <div><dt>后台监听</dt><dd>{{ moduleInfo.watcher_enabled ? '已开启' : '已关闭' }}</dd></div>
-              </dl>
-              <p v-if="moduleInfo.using_default_client" class="apple-detail-hint"><AlertCircle :size="13" />当前使用内置公共客户端，建议在系统设置中填入自己的 Azure 应用 ID 以提高稳定性。</p>
-            </div>
-            </div>
-                    <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
+                      <!-- ③ 别名邮箱：列的是本机邮箱池，删掉就是连池子一起删。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.aliases" @click="openSections.aliases = !openSections.aliases">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><MailOpen :size="15" />别名邮箱</strong>
+                              <small>{{ poolMailboxes.length }} 个地址在邮箱池里 · Graph 不提供创建接口，请到 account.microsoft.com 手工创建后再导入</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" @click="openAddAliasDialog"><Plus :size="13" />手工添加</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.aliases" class="detail-section-body">
+                          <div v-if="!poolMailboxes.length" class="apple-state-empty">这个账号还没有地址进邮箱池，点页面上的“发现别名”或“手工添加”。</div>
+                          <ul v-else class="apple-alias-list">
+                            <li v-for="mailbox in poolMailboxes" :key="mailbox.id" class="apple-alias-row">
+                              <MailOpen :size="13" />
+                              <span class="font-mono">{{ mailbox.email }}</span>
+                              <span v-if="isPrimaryMailbox(mailbox)" class="apple-alias-primary">主地址</span>
+                              <button type="button" class="apple-delete-button" :title="`删除 ${mailbox.email}`" :aria-label="`删除 ${mailbox.email}`" :disabled="isBusy(`alias-delete:${mailbox.id}`)" @click="deleteAlias(mailbox)"><LoaderCircle v-if="isBusy(`alias-delete:${mailbox.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button>
+                            </li>
+                          </ul>
+                        </div>
+                      </section>
                     </div>
                   </td>
                 </tr>

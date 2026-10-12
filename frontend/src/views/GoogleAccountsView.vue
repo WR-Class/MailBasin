@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { AlertCircle, Globe, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Server, Tag, Trash2, X } from '@lucide/vue'
+import { AlertCircle, ChevronRight, Globe, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Save, Server, Tag, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -23,6 +23,13 @@ const aliasNotice = ref('')
 const redirectURI = ref('')
 const aliasForm = reactive({ email: '', label: '', note: '' })
 const tagForm = reactive({ tag: '', label: '', note: '' })
+
+// 应用凭据（客户端 ID / 密钥 / 代理）在这里改：系统设置页不再重复展示授权信息。
+// 它必须放在账号列表之上——一个账号都还没建的时候，就得先能填这里。
+const credentialsOpen = ref(false)
+const credentialsForm = reactive({ client_id: '', client_secret: '', proxy: '', watcher_enabled: true })
+const googleStatus = ref({})
+let credentialsLoaded = false
 
 // 批量生成用独立的表单：前缀留空即纯随机，数量决定一次建多少个。
 const showBatch = ref(false)
@@ -55,7 +62,7 @@ const moduleInfo = computed(() => data.value.module || {})
 const moduleConfigured = computed(() => moduleInfo.value.configured !== false)
 const loginTitle = computed(() => {
   if (!moduleReady.value) return 'Google 模块已在配置中关闭'
-  if (!moduleConfigured.value) return '请先在系统设置中填写 Google 客户端 ID'
+  if (!moduleConfigured.value) return '请先在上方「应用授权信息」里填写 Google 客户端 ID'
   return '跳转到 Google 授权页面，用浏览器登录'
 })
 
@@ -106,6 +113,7 @@ async function load(options = {}) {
   if (!silent) loading.value = true
   try {
     data.value = await api('/api/google-accounts')
+    await loadGoogleStatus()
     if (selected.value) {
       const current = (data.value.items || []).find((item) => item.id === selected.value.id)
       if (current) selected.value = { ...selected.value, ...current }
@@ -119,6 +127,53 @@ async function load(options = {}) {
     flash(err.message, true)
   } finally {
     if (!silent) loading.value = false
+  }
+}
+
+// 凭据表单只在首次加载和保存之后回填。load() 会被实时事件触发，每次都回填
+// 会把使用者正在输入的内容冲掉。
+function applyCredentials(force = false) {
+  if (credentialsLoaded && !force) return
+  const status = googleStatus.value || {}
+  credentialsForm.client_id = String(status.client_id || '')
+  credentialsForm.client_secret = ''
+  credentialsForm.proxy = String(status.proxy || '')
+  credentialsForm.watcher_enabled = status.watcher_enabled !== false
+  credentialsLoaded = true
+  // 还没配好客户端就直接展开：不填这里，一个 Google 账号都加不了。
+  if (!status.configured) credentialsOpen.value = true
+}
+
+async function loadGoogleStatus() {
+  try {
+    googleStatus.value = await api('/api/google/status')
+  } catch {
+    // Google 模块不可用时不该拖垮整个页面。
+    googleStatus.value = {}
+  }
+  applyCredentials()
+}
+
+async function saveCredentials() {
+  if (!startBusy('save-credentials')) return
+  try {
+    googleStatus.value = await api('/api/google/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        client_id: credentialsForm.client_id,
+        client_secret: credentialsForm.client_secret,
+        proxy: credentialsForm.proxy,
+        watcher_enabled: credentialsForm.watcher_enabled,
+      }),
+    })
+    applyCredentials(true)
+    credentialsOpen.value = !googleStatus.value.configured
+    flash('Google 授权信息已保存')
+    await load({ silent: true })
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('save-credentials')
   }
 }
 
@@ -396,14 +451,50 @@ onBeforeUnmount(() => {
         <span>{{ moduleInfo.alias_limit_note }}</span>
       </div>
 
-      <p v-if="!moduleConfigured" class="apple-detail-hint">
-        <AlertCircle :size="13" />
-        <span>{{ moduleInfo.setup_note || 'Google 没有可以内置的公共客户端，必须自己在 Google Cloud Console 建一个「桌面应用」类型的 OAuth 客户端，启用 Gmail API，并把自己的 Gmail 加为测试用户。' }}然后到<RouterLink to="/settings" class="link-button">系统设置</RouterLink>页填写客户端 ID 与客户端密钥。</span>
-      </p>
-      <p v-if="moduleInfo.proxy_detected === false" class="apple-detail-hint">
-        <AlertCircle :size="13" />
-        <span>访问 Google 可能需要代理，Go 不会自动读取 Windows 系统代理，请在<RouterLink to="/settings" class="link-button">系统设置</RouterLink>页填写代理地址。</span>
-      </p>
+      <!-- Google 的客户端凭据在这里改：系统设置页不再重复展示授权信息。
+           放在账号列表之上，是因为一个账号都还没建的时候就必须先能填。 -->
+      <section class="detail-section google-credentials">
+        <header class="detail-section-head">
+          <button type="button" class="detail-section-toggle" :aria-expanded="credentialsOpen" @click="credentialsOpen = !credentialsOpen">
+            <ChevronRight :size="15" class="detail-section-caret" />
+            <span class="detail-section-title">
+              <strong><KeyRound :size="15" />应用授权信息</strong>
+              <small>{{ moduleConfigured ? '已配置客户端，点击可修改' : '还没配置客户端，不填这里一个 Google 账号都加不了' }}</small>
+            </span>
+          </button>
+        </header>
+        <div v-if="credentialsOpen" class="detail-section-body">
+          <p v-if="!moduleConfigured" class="apple-detail-hint">
+            <AlertCircle :size="13" />
+            <span>{{ moduleInfo.setup_note || 'Google 没有可以内置的公共客户端，必须自己在 Google Cloud Console 建一个「桌面应用」类型的 OAuth 客户端，启用 Gmail API，并把自己的 Gmail 加为测试用户。' }}</span>
+          </p>
+          <div class="detail-field-grid">
+            <label class="form-group">
+              <span class="form-label">客户端 ID（必填）</span>
+              <input v-model.trim="credentialsForm.client_id" class="field font-mono" type="text" autocomplete="off" maxlength="200" placeholder="xxxxxxxx.apps.googleusercontent.com" />
+              <small class="form-help">Google Cloud Console → 凭据 → 创建 OAuth 客户端 ID → 应用类型选「<strong>桌面应用</strong>」。</small>
+            </label>
+            <label class="form-group">
+              <span class="form-label">客户端密钥（必填）</span>
+              <input v-model.trim="credentialsForm.client_secret" class="field font-mono" type="password" autocomplete="off" maxlength="200" :placeholder="googleStatus.has_client_secret ? '已保存，留空则不变更' : '粘贴凭据页的客户端密钥'" />
+              <small class="form-help">Google 文档把它标为「可选」，但实测换取令牌时<strong>必须提供</strong>，桌面应用类型也一样。</small>
+            </label>
+            <label class="form-group">
+              <span class="form-label">代理地址</span>
+              <input v-model.trim="credentialsForm.proxy" class="field font-mono" type="text" autocomplete="off" maxlength="200" :placeholder="googleStatus.proxy_detected ? '已自动检测到系统代理' : '例如 http://127.0.0.1:7897'" />
+              <small class="form-help">留空则自动读取系统代理。<strong>Go 不会自己读 Windows 的系统代理设置</strong>，Google 在部分网络里无法直连。</small>
+            </label>
+            <label class="settings-capability-option">
+              <span class="settings-capability-option-icon"><Globe :size="16" /></span>
+              <span class="settings-capability-option-copy"><strong>Gmail 后台收信监听</strong><small>按 Delivered-To / To 把收件箱分发到各 + 标签地址，默认 15 秒一轮，失败后退避。</small></span>
+              <input v-model="credentialsForm.watcher_enabled" class="detail-switch" type="checkbox" />
+            </label>
+          </div>
+          <div class="detail-section-foot">
+            <button type="button" class="secondary-button" :disabled="isBusy('save-credentials')" @click="saveCredentials"><LoaderCircle v-if="isBusy('save-credentials')" :size="14" class="animate-spin" /><Save v-else :size="14" />{{ isBusy('save-credentials') ? '保存中' : '保存授权信息' }}</button>
+          </div>
+        </div>
+      </section>
 
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Google 账号</div>
       <div v-else class="apple-account-body">

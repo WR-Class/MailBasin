@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { AlertCircle, Clipboard, Inbox, LoaderCircle, MailOpen, RefreshCw } from '@lucide/vue'
+import { AlertCircle, ChevronRight, Clipboard, Inbox, LoaderCircle, MailOpen, RefreshCw } from '@lucide/vue'
 import { api } from '../api/client'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
@@ -16,12 +16,20 @@ import { useToast } from '../composables/useToast'
 const props = defineProps({
   accountId: { type: String, default: '' },
   accountName: { type: String, default: '' },
+  // 折叠模式：给「详情搬进展开行」的那套页面用，默认收起。
+  // 没开这个开关的页面，渲染结果与以前完全一致。
+  collapsible: { type: Boolean, default: false },
 })
 
 const loading = ref(false)
 const refreshing = ref(false)
 const inbox = ref(null)
 const errorText = ref('')
+// 折叠模式下标题栏就是开关；非折叠模式永远展开。
+const open = ref(!props.collapsible)
+const inboxSubtitle = computed(() =>
+  props.accountName ? `${props.accountName} 名下所有地址收到的信，都在这里` : '名下所有地址收到的信，都在这里'
+)
 const { success, error: showError } = useToast()
 let realtimeRefreshTimer
 let realtimeUnsubscribe = () => {}
@@ -126,58 +134,68 @@ onBeforeUnmount(() => {
 <template>
   <section class="panel apple-detail-block inbox-panel">
     <header class="apple-section-heading">
-      <div>
+      <!-- 折叠模式下标题栏本身就是开关。标题右侧的「重新读取」必须是另一个
+           兄弟按钮，不能嵌进开关里——按钮套按钮是无效结构。 -->
+      <button v-if="collapsible" type="button" class="detail-section-toggle" :aria-expanded="open" @click="open = !open">
+        <ChevronRight :size="15" class="detail-section-caret" />
+        <span class="detail-section-title">
+          <strong><Inbox :size="15" />邮件与验证码</strong>
+          <small>{{ inboxSubtitle }}</small>
+        </span>
+      </button>
+      <div v-else>
         <h3><Inbox :size="15" />邮件与验证码</h3>
-        <p v-if="accountName">{{ accountName }} 名下所有地址收到的信，都在这里</p>
-        <p v-else>名下所有地址收到的信，都在这里</p>
+        <p>{{ inboxSubtitle }}</p>
       </div>
-      <button type="button" class="secondary-button apple-check-button" :disabled="!accountId || loading || refreshing" @click="load({ refresh: true })">
+      <button v-if="!collapsible || open" type="button" class="secondary-button apple-check-button" :disabled="!accountId || loading || refreshing" @click="load({ refresh: true })">
         <LoaderCircle v-if="refreshing" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />重新读取
       </button>
     </header>
 
-    <div v-if="!accountId" class="apple-state-empty">先在左边选中一个邮箱。</div>
-    <div v-else-if="loading" class="apple-state-empty"><LoaderCircle :size="14" class="animate-spin" />正在读取本地邮件</div>
-    <div v-else-if="errorText" class="apple-state-empty"><AlertCircle :size="14" />{{ errorText }}</div>
-    <template v-else>
-      <div class="inbox-summary">
-        <span class="inbox-summary-pill">共 {{ total }} 封</span>
-        <span class="inbox-summary-pill inbox-summary-code">{{ codeCount }} 封带验证码</span>
-        <span v-if="total > messages.length" class="inbox-summary-pill">只显示最近 {{ messages.length }} 封</span>
-      </div>
+    <template v-if="!collapsible || open">
+      <div v-if="!accountId" class="apple-state-empty">先在左边选中一个邮箱。</div>
+      <div v-else-if="loading" class="apple-state-empty"><LoaderCircle :size="14" class="animate-spin" />正在读取本地邮件</div>
+      <div v-else-if="errorText" class="apple-state-empty"><AlertCircle :size="14" />{{ errorText }}</div>
+      <template v-else>
+        <div class="inbox-summary">
+          <span class="inbox-summary-pill">共 {{ total }} 封</span>
+          <span class="inbox-summary-pill inbox-summary-code">{{ codeCount }} 封带验证码</span>
+          <span v-if="total > messages.length" class="inbox-summary-pill">只显示最近 {{ messages.length }} 封</span>
+        </div>
 
-      <div v-if="mailboxes.length" class="inbox-address-list">
-        <article v-for="mailbox in mailboxes" :key="mailbox.id" class="inbox-address-row">
-          <span class="inbox-address-email font-mono">{{ mailbox.email }}</span>
-          <span v-if="!mailbox.pool_hidden" class="inbox-tag inbox-tag-pool">已在邮箱池</span>
-          <span v-else class="inbox-tag">未进池</span>
-          <button v-if="mailbox.last_code" type="button" class="inbox-tag inbox-tag-code inbox-tag-copy" :title="`复制验证码 ${mailbox.last_code}（收到于 ${formatTime(mailbox.last_code_at)}）`" @click="copyCode(mailbox.last_code)">
-            <Clipboard :size="11" /><span>最近验证码</span><span class="font-mono inbox-tag-code-value">{{ mailbox.last_code }}</span>
-          </button>
-          <span v-else class="inbox-tag inbox-tag-muted">暂无验证码</span>
-        </article>
-      </div>
+        <div v-if="mailboxes.length" class="inbox-address-list">
+          <article v-for="mailbox in mailboxes" :key="mailbox.id" class="inbox-address-row">
+            <span class="inbox-address-email font-mono">{{ mailbox.email }}</span>
+            <span v-if="!mailbox.pool_hidden" class="inbox-tag inbox-tag-pool">已在邮箱池</span>
+            <span v-else class="inbox-tag">未进池</span>
+            <button v-if="mailbox.last_code" type="button" class="inbox-tag inbox-tag-code inbox-tag-copy" :title="`复制验证码 ${mailbox.last_code}（收到于 ${formatTime(mailbox.last_code_at)}）`" @click="copyCode(mailbox.last_code)">
+              <Clipboard :size="11" /><span>最近验证码</span><span class="font-mono inbox-tag-code-value">{{ mailbox.last_code }}</span>
+            </button>
+            <span v-else class="inbox-tag inbox-tag-muted">暂无验证码</span>
+          </article>
+        </div>
 
-      <div v-if="!messages.length" class="apple-state-empty">名下地址还没有收到任何邮件。点页面上的「同步」去读一次。</div>
-      <ul v-else class="inbox-message-list">
-        <li v-for="message in ordered" :key="message.id" class="inbox-message-row">
-          <div class="inbox-message-main">
-            <strong class="inbox-message-subject">{{ message.subject || '（无标题）' }}</strong>
-            <small class="inbox-message-meta">
-              <span class="font-mono">{{ message.mailbox_email }}</span>
-              <span>·</span>
-              <span>{{ formatTime(message.received_at) }}</span>
-              <span v-if="message.from">·</span>
-              <span v-if="message.from" class="inbox-message-from">{{ message.from }}</span>
-            </small>
-          </div>
-          <button v-if="message.code" type="button" class="inbox-code-button" :title="`复制验证码 ${message.code}`" @click="copyCode(message.code)">
-            <Clipboard :size="12" /><span class="font-mono">{{ message.code }}</span>
-          </button>
-          <span v-else class="inbox-tag inbox-tag-muted">无验证码</span>
-        </li>
-      </ul>
-      <p v-if="messages.length" class="apple-detail-hint"><AlertCircle :size="13" />这里读的是本地已存下的邮件，不发网络请求；要看新到的信，点页面上的「同步」。</p>
+        <div v-if="!messages.length" class="apple-state-empty">名下地址还没有收到任何邮件。点页面上的「同步」去读一次。</div>
+        <ul v-else class="inbox-message-list">
+          <li v-for="message in ordered" :key="message.id" class="inbox-message-row">
+            <div class="inbox-message-main">
+              <strong class="inbox-message-subject">{{ message.subject || '（无标题）' }}</strong>
+              <small class="inbox-message-meta">
+                <span class="font-mono">{{ message.mailbox_email }}</span>
+                <span>·</span>
+                <span>{{ formatTime(message.received_at) }}</span>
+                <span v-if="message.from">·</span>
+                <span v-if="message.from" class="inbox-message-from">{{ message.from }}</span>
+              </small>
+            </div>
+            <button v-if="message.code" type="button" class="inbox-code-button" :title="`复制验证码 ${message.code}`" @click="copyCode(message.code)">
+              <Clipboard :size="12" /><span class="font-mono">{{ message.code }}</span>
+            </button>
+            <span v-else class="inbox-tag inbox-tag-muted">无验证码</span>
+          </li>
+        </ul>
+        <p v-if="messages.length" class="apple-detail-hint"><AlertCircle :size="13" />这里读的是本地已存下的邮件，不发网络请求；要看新到的信，点页面上的「同步」。</p>
+      </template>
     </template>
   </section>
 </template>

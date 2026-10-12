@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Bell, CalendarClock, CheckCircle2, CircleAlert, Cloud, Database, ExternalLink, Eye, EyeOff, FolderGit2, GitCommit, Globe2, KeyRound, LoaderCircle, LogIn, Mail, Monitor, PackageOpen, RefreshCw, Save, Send, ShieldCheck, Sparkles, Trash2, WifiOff } from '@lucide/vue'
+import { Bell, CalendarClock, CheckCircle2, CircleAlert, Cloud, Database, ExternalLink, Eye, EyeOff, FolderGit2, GitCommit, Globe2, KeyRound, LoaderCircle, LogIn, Monitor, PackageOpen, RefreshCw, Save, Send, ShieldCheck, Sparkles, Trash2, WifiOff } from '@lucide/vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -34,29 +34,8 @@ const form = reactive({
 })
 const { success, error: showError } = useToast()
 const { updateState, showChecking, loadUpdates } = useUpdates()
-// Microsoft 配置走独立端点（/api/microsoft/settings），不在 /api/settings 的载荷里，
-// 所以这一段有自己的保存动作，而不是混进“保存系统设置”。
-const microsoftStatus = ref({})
-const microsoftForm = reactive({
-  client_id: '',
-  tenant: '',
-  watcher_enabled: true,
-})
-const MICROSOFT_SAVE_KEY = 'microsoft'
-// Google 同样走独立端点（/api/google/settings）。
-//
-// 与 Microsoft 最大的不同：Google 没有可以内置的公共客户端，client_id 必须自己建，
-// 所以这里没有"留空使用内置值"的兜底；另外代理是必填项而非可选项——
-// Go 不会自动读取 Windows 的系统代理设置，而 Google 在部分网络里无法直连。
-const googleStatus = ref({})
-const googleForm = reactive({
-  client_id: '',
-  client_secret: '',
-  proxy: '',
-  redirect_base: '',
-  watcher_enabled: true,
-})
-const GOOGLE_SAVE_KEY = 'google'
+// 应用凭据（Microsoft / Google 的客户端 ID、密钥、租户、代理）不在这里改：
+// 它们已经搬到各自账号页的就地编辑里，本页只留一段指路文字。
 const publicAPIKeyReady = computed(() => Boolean(String(form.public_api_key || '').trim() || runtime.value.config_api_key_configured))
 const publicAPIKeySourceText = computed(() => {
   if (String(form.public_api_key || '').trim()) return '系统设置'
@@ -115,90 +94,6 @@ function generatePublicAPIKey() {
   notify('公共 API Key 已生成，请保存系统设置')
 }
 
-// applyMicrosoftStatus 把接口返回的“生效值”映射到表单。
-//
-// 关键：status 里的 client_id 是套用内置兜底之后的生效值。用户没自己填过时，
-// 输入框必须留空、把兜底值当占位符——否则第一次点保存就会把兜底值当成
-// 用户的选择写进数据库，之后内置客户端换了也再不会跟着走。
-function applyMicrosoftStatus(status) {
-  microsoftStatus.value = status || {}
-  microsoftForm.client_id = status?.using_default_client ? '' : String(status?.client_id || '')
-  microsoftForm.tenant = String(status?.tenant || '') === 'common' ? '' : String(status?.tenant || '')
-  microsoftForm.watcher_enabled = status?.watcher_enabled !== false
-}
-
-async function loadMicrosoftStatus() {
-  try {
-    applyMicrosoftStatus(await api('/api/microsoft/status'))
-  } catch {
-    // Microsoft 模块不可用（或未启用）时不应拖垮整个设置页。
-    microsoftStatus.value = {}
-  }
-}
-
-async function saveMicrosoft() {
-  saving.value = MICROSOFT_SAVE_KEY
-  try {
-    const status = await api('/api/microsoft/settings', {
-      method: 'PUT',
-      body: JSON.stringify({
-        client_id: microsoftForm.client_id,
-        tenant: microsoftForm.tenant,
-        watcher_enabled: microsoftForm.watcher_enabled,
-      }),
-    })
-    applyMicrosoftStatus(status)
-    notify('Microsoft 设置已保存')
-  } catch (err) {
-    notify(err.message, true)
-  } finally {
-    saving.value = ''
-  }
-}
-
-// applyGoogleStatus 把接口返回的生效值映射到表单。
-// 这里没有 Microsoft 那种"留空即用内置值"的兜底：Google 不允许内置公共客户端，
-// client_id 空就是没配置，输入框必须如实反映这一点。
-function applyGoogleStatus(status) {
-  googleStatus.value = status || {}
-  googleForm.client_id = String(status?.client_id || '')
-  googleForm.proxy = String(status?.proxy || '')
-  googleForm.redirect_base = ''
-  googleForm.watcher_enabled = status?.watcher_enabled !== false
-}
-
-async function loadGoogleStatus() {
-  try {
-    applyGoogleStatus(await api('/api/google/status'))
-  } catch {
-    // Google 模块不可用时不应拖垮整个设置页。
-    googleStatus.value = {}
-  }
-}
-
-async function saveGoogle() {
-  saving.value = GOOGLE_SAVE_KEY
-  try {
-    const status = await api('/api/google/settings', {
-      method: 'PUT',
-      body: JSON.stringify({
-        client_id: googleForm.client_id,
-        client_secret: googleForm.client_secret,
-        proxy: googleForm.proxy,
-        redirect_base: googleForm.redirect_base,
-        watcher_enabled: googleForm.watcher_enabled,
-      }),
-    })
-    googleForm.client_secret = ''
-    applyGoogleStatus(status)
-    notify('Google 设置已保存')
-  } catch (err) {
-    notify(err.message, true)
-  } finally {
-    saving.value = ''
-  }
-}
-
 async function load(options = {}) {
   const silent = Boolean(options.silent)
   if (!silent) loading.value = true
@@ -207,8 +102,6 @@ async function load(options = {}) {
     Object.assign(form, settingsData.settings || {})
     dataPath.value = settingsData.data_path || ''
     runtime.value = settingsData.runtime || {}
-    await loadMicrosoftStatus()
-    await loadGoogleStatus()
   } catch (err) {
     notify(err.message, true)
   } finally {
@@ -421,59 +314,12 @@ onBeforeUnmount(() => {
             </label>
           </div>
         </section>
+        <!-- 应用凭据（客户端 ID / 密钥 / 租户 / 代理）已搬到各自的账号页就地编辑。
+             这里不再重复展示：同一个值有两个能改的地方，迟早会改岔。 -->
         <section class="settings-microsoft">
-          <h3 class="section-title flex items-center gap-2"><Mail :size="16" />Microsoft 账号</h3>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <label class="settings-capability-option">
-              <span class="settings-capability-option-icon"><Mail :size="16" /></span>
-              <span class="settings-capability-option-copy"><strong>Graph 后台收信监听</strong><small>按收件人把 Graph 返回的整箱邮件分发到对应别名，默认 15 秒一轮，失败后退避。</small></span>
-              <input v-model="microsoftForm.watcher_enabled" class="detail-switch" type="checkbox" />
-            </label>
-            <label class="form-group">
-              <span class="form-label">客户端 ID</span>
-              <input v-model.trim="microsoftForm.client_id" class="field font-mono" type="text" autocomplete="off" maxlength="120" placeholder="留空使用内置公共客户端" />
-              <small class="form-help">留空则使用内置的微软公共客户端 ID。长期使用建议在 Azure 注册自己的应用后填在这里。</small>
-            </label>
-            <label class="form-group">
-              <span class="form-label">租户</span>
-              <input v-model.trim="microsoftForm.tenant" class="field font-mono" type="text" autocomplete="off" maxlength="120" placeholder="common" />
-              <small class="form-help">个人 Microsoft 账号（outlook.com / hotmail.com）请保持 <code>common</code>。</small>
-            </label>
-          </div>
-          <footer class="settings-microsoft-footer">
-            <span :class="microsoftStatus.using_default_client ? '' : 'is-ready'"><i></i>{{ microsoftStatus.using_default_client ? '当前使用内置公共客户端' : '当前使用自定义客户端' }}<template v-if="microsoftStatus.account_count">｜已接入 {{ microsoftStatus.account_count }} 个账号</template></span>
-            <button type="button" class="secondary-button" :disabled="Boolean(saving)" @click="saveMicrosoft"><LoaderCircle v-if="saving === MICROSOFT_SAVE_KEY" :size="14" class="animate-spin" /><Save v-else :size="14" />{{ saving === MICROSOFT_SAVE_KEY ? '保存中' : '保存 Microsoft 设置' }}</button>
-          </footer>
-        </section>
-        <!-- 复用 settings-microsoft 系列 class，保证与上一段视觉完全一致（样式已全局定义）。 -->
-        <section class="settings-microsoft">
-          <h3 class="section-title flex items-center gap-2"><Globe2 :size="16" />Google 账号</h3>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <label class="settings-capability-option">
-              <span class="settings-capability-option-icon"><Globe2 :size="16" /></span>
-              <span class="settings-capability-option-copy"><strong>Gmail 后台收信监听</strong><small>按 Delivered-To / To 把收件箱分发到各 + 标签地址，默认 15 秒一轮，失败后退避。</small></span>
-              <input v-model="googleForm.watcher_enabled" class="detail-switch" type="checkbox" />
-            </label>
-            <label class="form-group">
-              <span class="form-label">客户端 ID（必填）</span>
-              <input v-model.trim="googleForm.client_id" class="field font-mono" type="text" autocomplete="off" maxlength="200" placeholder="xxxxxxxx.apps.googleusercontent.com" />
-              <small class="form-help">Google 不允许内置公共客户端，必须自己建：Google Cloud Console → 凭据 → 创建 OAuth 客户端 ID → 应用类型选「<strong>桌面应用</strong>」。同时要启用 Gmail API，并把自己的 Gmail 加进测试用户。</small>
-            </label>
-            <label class="form-group">
-              <span class="form-label">客户端密钥（必填）</span>
-              <input v-model.trim="googleForm.client_secret" class="field font-mono" type="password" autocomplete="off" maxlength="200" :placeholder="googleStatus.has_client_secret ? '已保存，留空则不变更' : '粘贴凭据页的客户端密钥'" />
-              <small class="form-help">Google 的文档把这一项标为「可选」，但实测换取令牌时<strong>必须提供</strong>，桌面应用类型也一样——不填会直接报「client_secret is missing」。在凭据页复制「客户端密钥」粘贴到这里。</small>
-            </label>
-            <label class="form-group">
-              <span class="form-label">代理地址</span>
-              <input v-model.trim="googleForm.proxy" class="field font-mono" type="text" autocomplete="off" maxlength="200" :placeholder="googleStatus.proxy_detected ? '已自动检测到系统代理' : '例如 http://127.0.0.1:7897'" />
-              <small class="form-help">留空则自动读取系统代理。<strong>Go 不会自己读 Windows 的系统代理设置</strong>，而 Google 在部分网络里无法直连——若账号一直连不上，先检查这一项。</small>
-            </label>
-          </div>
-          <footer class="settings-microsoft-footer">
-            <span :class="googleStatus.configured ? 'is-ready' : ''"><i></i>{{ googleStatus.configured ? '已配置客户端' : '尚未配置客户端 ID' }}<template v-if="googleStatus.account_count">｜已接入 {{ googleStatus.account_count }} 个账号</template><template v-if="googleStatus.proxy_detected">｜代理已生效</template></span>
-            <button type="button" class="secondary-button" :disabled="Boolean(saving)" @click="saveGoogle"><LoaderCircle v-if="saving === GOOGLE_SAVE_KEY" :size="14" class="animate-spin" /><Save v-else :size="14" />{{ saving === GOOGLE_SAVE_KEY ? '保存中' : '保存 Google 设置' }}</button>
-          </footer>
+          <h3 class="section-title flex items-center gap-2"><KeyRound :size="16" />应用授权信息</h3>
+          <p class="form-help">Microsoft 的客户端 ID、租户与后台收信监听，在<RouterLink to="/microsoft-accounts" class="link-button">Microsoft 账号</RouterLink>页点开任一账号后的「授权信息」里改。</p>
+          <p class="form-help">Google 的客户端 ID、客户端密钥与代理地址，在<RouterLink to="/google-accounts" class="link-button">Google 账号</RouterLink>页顶部的「应用授权信息」里改——那一段在没有账号时也会显示，第一次配置就填那里。</p>
         </section>
         <section class="settings-server-chan">
           <div class="server-chan-card">

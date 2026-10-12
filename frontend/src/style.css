@@ -908,6 +908,124 @@ textarea.field {
   gap: 10px;
 }
 
+/* 展开块里的分区。三块（授权信息 / 邮件与验证码 / 别名邮箱）默认折叠：
+   以前它们平铺在一起，别名一多就得翻很久才够得着下面那块。 */
+.detail-section {
+  border: 1px solid var(--app-line);
+  border-radius: 10px;
+  background: var(--app-surface);
+  overflow: hidden;
+}
+
+.detail-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 6px 12px;
+}
+
+.detail-section-toggle {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.detail-section-caret {
+  flex: none;
+  color: var(--app-muted);
+  transition: transform 0.15s ease;
+}
+
+.detail-section-toggle[aria-expanded='true'] .detail-section-caret {
+  transform: rotate(90deg);
+}
+
+.detail-section-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.detail-section-title strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.detail-section-title small {
+  color: var(--app-muted);
+  font-size: 11px;
+}
+
+.detail-section-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--app-line);
+}
+
+/* 就地编辑授权信息用的两列表单，窄屏自动落成一列。 */
+.detail-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.detail-section-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* 别名行：地址占满，删除按钮靠右。 */
+.apple-alias-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.apple-alias-row > .font-mono {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.apple-alias-primary {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.18);
+  white-space: nowrap;
+}
+
+/* Google 账号页顶部那段「应用授权信息」：和下面的账号列表拉开一点。 */
+.google-credentials {
+  margin-bottom: 12px;
+}
+
 .apple-section-heading,
 .apple-detail-heading,
 .dashboard-section-heading {
