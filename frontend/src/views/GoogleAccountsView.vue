@@ -18,6 +18,8 @@ const showGenerate = ref(false)
 const showAddMailbox = ref(false)
 const data = ref({ items: [], module: {}, module_ready: true })
 const selected = ref(null)
+// 展开块里的分区默认都折叠，和其余服务商页面保持同一套手感。
+const openSections = reactive({ channel: false, addresses: false, auth: false })
 // 列表分页：账号会越加越多，一次全渲染到页面上既慢又重，所以只取当前这一页。
 // 搜索和分页一起存在才有用：只有分页时找一条记录要点几十次「下一页」，
 // 只有搜索时一次匹配几百条又会把体积问题原样搬回来。
@@ -268,6 +270,19 @@ async function selectAccount(account) {
   } finally {
     finishBusy(busyKey)
   }
+}
+
+// 点已经展开的那一行要收起。收起时把授权态和地址一并清掉——它们属于上一个账号，
+// 留着下一次展开会先闪一下别人的数据。默认不选中任何行。
+async function toggleAccount(account) {
+  if (selected.value?.id === account.id) {
+    selected.value = null
+    session.value = {}
+    aliases.value = []
+    aliasNotice.value = ''
+    return
+  }
+  await selectAccount(account)
 }
 
 async function deleteAccount(account) {
@@ -532,69 +547,112 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Google 账号</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>账号与授权</h3><p>选择账号后可在右侧查看 OAuth2 授权与地址</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
+          <header class="apple-section-heading"><div><h3>账号与授权</h3><p>选中一个后在它下方展开 OAuth2 授权、收信地址与验证码</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
           <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Google 账号' : '还没有 Google 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Google 账号”，在浏览器中完成 Google 授权。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
               <thead><tr><th>Google 账号</th><th>状态</th><th>读信通道</th><th>操作</th></tr></thead>
               <tbody>
-                <tr v-for="account in data.items" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${accountName(account)} 的授权详情`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                <template v-for="account in data.items" :key="account.id">
+                <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${accountName(account)} 的授权详情`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
                   <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Mail v-else :size="14" /></span><span><strong>{{ accountName(account) }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
                   <td><span :class="statusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span class="apple-channel-pill"><Globe :size="11" /><span>Gmail API</span><em class="bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">官方 API</em></span></div></td>
                   <td><button type="button" class="apple-delete-button" :title="`删除 ${accountName(account)}`" :aria-label="`删除 ${accountName(account)}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
                 </tr>
+                <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
+                  <td colspan="4" class="apple-account-expand-cell">
+                    <div class="apple-account-expand-body">
+                      <!-- ① 授权与通道：折叠 + 就地可校验。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.channel" @click="openSections.channel = !openSections.channel">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><KeyRound :size="15" />授权与通道</strong>
+                              <small>{{ accountName(selected) }} · OAuth2 授权状态与读信通道</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.channel" class="detail-section-body">
+                          <div class="apple-state-list">
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
+                              <span class="apple-state-copy"><strong>OAuth2 授权</strong><small>访问令牌按需自动续期，refresh_token 加密存储</small></span>
+                              <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
+                            </article>
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Globe :size="14" /></span>
+                              <span class="apple-state-copy"><strong>Gmail API</strong><small>读取收件箱并按收件人分发到各个地址</small></span>
+                              <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">已启用</span>
+                            </article>
+                          </div>
+                        </div>
+                      </section>
+
+                      <!-- ② 邮件与验证码：默认折叠，内容由 AccountInboxPanel 自己渲染。 -->
+                      <AccountInboxPanel collapsible :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
+
+                      <!-- ③ 收信地址：免费 Gmail 无法创建附加地址，只能用 + 标签生成。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.addresses" @click="openSections.addresses = !openSections.addresses">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><MailOpen :size="15" />收信地址</strong>
+                              <small>{{ aliases.length }} 个地址 · 免费 Gmail 无法创建附加地址，只能用 + 标签生成</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" @click="openAddMailboxDialog"><Plus :size="13" />手工添加</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.addresses" class="detail-section-body">
+                          <p v-if="aliasNotice" class="apple-detail-hint"><AlertCircle :size="13" /><span>{{ aliasNotice }}</span></p>
+                          <div v-if="!aliases.length" class="apple-state-empty">还没有已导入的地址，点击“读取地址”或“生成 + 地址”。</div>
+                          <ul v-else class="apple-alias-list">
+                            <li v-for="alias in aliases" :key="alias"><MailOpen :size="13" /><span class="font-mono">{{ alias }}</span></li>
+                          </ul>
+                        </div>
+                      </section>
+
+                      <!-- ④ 授权信息：客户端与代理来自系统设置或 config.json。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.auth" @click="openSections.auth = !openSections.auth">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><Server :size="15" />授权信息</strong>
+                              <small>客户端与代理来自系统设置或 config.json</small>
+                            </span>
+                          </button>
+                        </header>
+                        <div v-if="openSections.auth" class="detail-section-body">
+                          <dl class="apple-meta-list">
+                            <div><dt>客户端 ID</dt><dd class="font-mono">{{ moduleInfo.client_id || '—' }}</dd></div>
+                            <div><dt>回调地址</dt><dd class="font-mono">{{ redirectURI || moduleInfo.redirect_uri || '—' }}</dd></div>
+                            <div><dt>授权范围</dt><dd class="font-mono">{{ session.scope || '—' }}</dd></div>
+                            <div><dt>代理</dt><dd class="font-mono">{{ moduleInfo.proxy_detected ? (moduleInfo.proxy || '已启用') : '未配置' }}</dd></div>
+                            <div><dt>后台监听</dt><dd>{{ moduleInfo.watcher_enabled ? '已开启' : '已关闭' }}</dd></div>
+                            <div><dt>上次校验</dt><dd>{{ formatTime(session.last_checked_at) }}</dd></div>
+                          </dl>
+                          <p v-if="!session.exists" class="apple-detail-hint"><AlertCircle :size="13" /><span>本地没有这个账号的 Google 登录态，请重新授权后再试。</span></p>
+                          <p v-else-if="session.last_status_message" class="apple-detail-hint"><AlertCircle :size="13" /><span>{{ session.last_status_message }}</span></p>
+                        </div>
+                      </section>
+                    </div>
+                  </td>
+                </tr>
+                </template>
               </tbody>
             </table>
           </div>
           <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个账号" :loading="loading" @change="changePage" />
         </section>
-
-        <aside class="apple-detail-panel">
-          <div v-if="!selected" class="apple-detail-empty"><span><Globe :size="20" /></span><strong>选择一个 Google 账号</strong><small>OAuth2 授权状态与地址列表会显示在这里。</small></div>
-          <template v-else>
-            <header class="apple-detail-heading"><div><span>所选 Google 账号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '校验授权' }}</button></header>
-            <div class="ms-detail-scroll">
-            <div class="apple-state-list">
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
-                <span class="apple-state-copy"><strong>OAuth2 授权</strong><small>访问令牌按需自动续期，refresh_token 加密存储</small></span>
-                <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
-              </article>
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Globe :size="14" /></span>
-                <span class="apple-state-copy"><strong>Gmail API</strong><small>读取收件箱并按收件人分发到各个地址</small></span>
-                <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">已启用</span>
-              </article>
-            </div>
-
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>收信地址</h3><p>免费 Gmail 无法创建附加地址，只能用 + 标签生成</p></div><button class="secondary-button apple-check-button" @click="openAddMailboxDialog"><Plus :size="13" />手工添加</button></header>
-              <p v-if="aliasNotice" class="apple-detail-hint"><AlertCircle :size="13" /><span>{{ aliasNotice }}</span></p>
-              <div v-if="!aliases.length" class="apple-state-empty">还没有已导入的地址，点击“读取地址”或“生成 + 地址”。</div>
-              <ul v-else class="apple-alias-list">
-                <li v-for="alias in aliases" :key="alias"><MailOpen :size="13" /><span class="font-mono">{{ alias }}</span></li>
-              </ul>
-            </div>
-
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>授权信息</h3><p>客户端与代理来自系统设置或 config.json</p></div></header>
-              <dl class="apple-meta-list">
-                <div><dt>客户端 ID</dt><dd class="font-mono">{{ moduleInfo.client_id || '—' }}</dd></div>
-                <div><dt>回调地址</dt><dd class="font-mono">{{ redirectURI || moduleInfo.redirect_uri || '—' }}</dd></div>
-                <div><dt>授权范围</dt><dd class="font-mono">{{ session.scope || '—' }}</dd></div>
-                <div><dt>代理</dt><dd class="font-mono">{{ moduleInfo.proxy_detected ? (moduleInfo.proxy || '已启用') : '未配置' }}</dd></div>
-                <div><dt>后台监听</dt><dd>{{ moduleInfo.watcher_enabled ? '已开启' : '已关闭' }}</dd></div>
-                <div><dt>上次校验</dt><dd>{{ formatTime(session.last_checked_at) }}</dd></div>
-              </dl>
-              <p v-if="!session.exists" class="apple-detail-hint"><AlertCircle :size="13" /><span>本地没有这个账号的 Google 登录态，请重新授权后再试。</span></p>
-              <p v-else-if="session.last_status_message" class="apple-detail-hint"><AlertCircle :size="13" /><span>{{ session.last_status_message }}</span></p>
-            </div>
-            </div>
-          </template>
-          <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
-        </aside>
       </div>
     </section>
 

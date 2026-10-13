@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { AlertCircle, CheckCircle2, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Search, Server, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, ChevronRight, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Search, Server, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -23,6 +23,8 @@ const showCreate = ref(false)
 const showAddAddress = ref(false)
 const data = ref({ items: [], module: {} })
 const selected = ref(null)
+// 展开块里的分区默认都折叠，和其余服务商页面保持同一套手感。
+const openSections = reactive({ secret: false, addresses: false, provider: false })
 // 列表分页：几百个母号一次全渲染既慢又重，所以只取当前这一页。
 // 搜索和分页必须一起存在——只有分页时，在几百行里找一条要点几十次「下一页」；
 // 只有搜索时，一次匹配到几百条又把体积问题原样搬回来。
@@ -170,6 +172,11 @@ function changePage(target) {
 
 function selectAccount(account) {
   selected.value = account
+}
+
+// 点已经展开的那一行要收起。默认不选中任何行，也就是默认折叠——与其余服务商页面一致。
+function toggleAccount(account) {
+  selected.value = selected.value?.id === account.id ? null : account
 }
 
 function openCreateDialog() {
@@ -572,74 +579,117 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载{{ presetLabel }}</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后可在右侧查看它名下的地址</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱或标签" aria-label="搜索邮箱或标签" /></label><span>总 {{ total }} 个</span></header>
+          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后在它下方展开授权、名下地址与取信信息</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱或标签" aria-label="搜索邮箱或标签" /></label><span>总 {{ total }} 个</span></header>
           <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的' + presetLabel : '还没有 ' + presetLabel }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : `点击“添加${presetLabel}”，填入邮箱地址和客户端授权码。` }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-check" /><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
               <thead><tr><th class="apple-check-cell"><input type="checkbox" :checked="allPageChecked" :indeterminate="somePageChecked" :disabled="!accounts.length" title="全选本页" aria-label="全选本页母号" @change="togglePageSelection" /></th><th>邮箱</th><th>状态</th><th>地址</th><th>操作</th></tr></thead>
               <tbody>
-                <tr v-for="account in accounts" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id} 的地址`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                <template v-for="account in accounts" :key="account.id">
+                <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${account.label || account.apple_id} 的地址`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
                   <td class="apple-check-cell"><input type="checkbox" :checked="checkedIDs.includes(account.id)" :aria-label="`勾选 ${account.label || account.apple_id}`" @click.stop @change="toggleAccountSelection(account)" /></td>
                   <td><button type="button" class="apple-account-select" @click.stop="selectAccount(account)"><span class="apple-account-icon"><MailOpen :size="14" /></span><span><strong>{{ account.label || account.apple_id }}</strong><small>{{ account.apple_id }}</small></span></button></td>
                   <td><span :class="statusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span class="apple-channel-pill"><Inbox :size="11" /><span>{{ account.mailbox_count || 0 }} 个地址</span><em v-if="account.pool_count" class="bg-sky-50 text-sky-600 dark:bg-sky-950/30 dark:text-sky-300">其中 {{ account.pool_count }} 个进池</em></span></div></td>
                   <td><button type="button" class="apple-delete-button" :title="`删除 ${account.label || account.apple_id}`" :aria-label="`删除 ${account.label || account.apple_id}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
                 </tr>
+                <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
+                  <td colspan="5" class="apple-account-expand-cell">
+                    <div class="apple-account-expand-body">
+                      <!-- ① 授权与服务器：折叠 + 就地可同步。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.secret" @click="openSections.secret = !openSections.secret">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><KeyRound :size="15" />授权与服务器</strong>
+                              <small>{{ selected.label || selected.apple_id }} · 授权码与 IMAP 地址</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" :disabled="isBusy(`sync:${selected.id}`)" @click="syncAccount()"><LoaderCircle v-if="isBusy(`sync:${selected.id}`)" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy(`sync:${selected.id}`) ? '同步中' : '立即同步' }}</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.secret" class="detail-section-body">
+                          <div class="apple-state-list">
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
+                              <span class="apple-state-copy"><strong>客户端授权码</strong><small>等同于邮箱密码，落库加密存储</small></span>
+                              <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
+                            </article>
+                            <article class="apple-state-row">
+                              <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Server :size="14" /></span>
+                              <span class="apple-state-copy"><strong>{{ selected.imap_host }}:{{ selected.imap_port || 993 }}</strong><small>账号名 {{ selected.imap_username || selected.apple_id }}</small></span>
+                              <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">IMAP</span>
+                            </article>
+                          </div>
+                        </div>
+                      </section>
+
+                      <!-- ② 邮件与验证码：默认折叠，内容由 AccountInboxPanel 自己渲染。 -->
+                      <AccountInboxPanel collapsible :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
+
+                      <!-- ③ 名下地址：列全名下的地址，逐个决定要不要进邮箱池。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.addresses" @click="openSections.addresses = !openSections.addresses">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><MailOpen :size="15" />名下地址</strong>
+                              <small>{{ selected.mailbox_count || 0 }} 个地址 · 其中 {{ selected.pool_count || 0 }} 个在邮箱池 · 默认不进池，需要时逐个勾选</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" @click="openAddAddressDialog"><Plus :size="13" />添加地址</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.addresses" class="detail-section-body">
+                          <div v-if="!selected.mailboxes?.length" class="apple-state-empty">这个邮箱下还没有地址。</div>
+                          <ul v-else class="apple-alias-list">
+                            <li v-for="mailbox in selected.mailboxes" :key="mailbox.id">
+                              <MailOpen :size="13" />
+                              <span class="font-mono">{{ mailbox.email }}</span>
+                              <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`pool:${mailbox.id}`)" :title="mailbox.pool_hidden ? '放进邮箱池' : '移出邮箱池，只在本页可见'" @click="togglePool(mailbox)">
+                                <LoaderCircle v-if="isBusy(`pool:${mailbox.id}`)" :size="12" class="animate-spin" />
+                                <CheckCircle2 v-else-if="!mailbox.pool_hidden" :size="12" />
+                                <Plus v-else :size="12" />
+                                {{ mailbox.pool_hidden ? '进池' : '已在池中' }}
+                              </button>
+                            </li>
+                          </ul>
+                        </div>
+                      </section>
+
+                      <!-- ④ 服务商说明：限制来自服务商本身，不是本程序的选择。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.provider" @click="openSections.provider = !openSections.provider">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><Server :size="15" />服务商说明</strong>
+                              <small>这些限制来自服务商本身，不是本程序的选择</small>
+                            </span>
+                          </button>
+                        </header>
+                        <div v-if="openSections.provider" class="detail-section-body">
+                          <dl class="apple-meta-list">
+                            <div><dt>IMAP 服务器</dt><dd class="font-mono">{{ selected.imap_host }}:{{ selected.imap_port || 993 }}</dd></div>
+                            <div><dt>地址数量</dt><dd>{{ selected.mailbox_count || 0 }} 个，其中 {{ selected.pool_count || 0 }} 个在邮箱池</dd></div>
+                            <div><dt>已收邮件</dt><dd>{{ selected.message_count || 0 }} 封</dd></div>
+                          </dl>
+                          <p v-if="moduleInfo.hint" class="apple-detail-hint"><AlertCircle :size="13" />{{ moduleInfo.hint }}</p>
+                        </div>
+                      </section>
+                    </div>
+                  </td>
+                </tr>
+                </template>
               </tbody>
             </table>
           </div>
           <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个母号" :loading="loading" @change="changePage" />
         </section>
-
-        <aside class="apple-detail-panel">
-          <div v-if="!selected" class="apple-detail-empty"><span><MailOpen :size="20" /></span><strong>选择一个邮箱</strong><small>它的服务器信息与名下地址会显示在这里。</small></div>
-          <template v-else>
-            <header class="apple-detail-heading"><div><span>所选邮箱</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy(`sync:${selected.id}`)" @click="syncAccount()"><LoaderCircle v-if="isBusy(`sync:${selected.id}`)" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy(`sync:${selected.id}`) ? '同步中' : '立即同步' }}</button></header>
-            <div class="ms-detail-scroll">
-            <div class="apple-state-list">
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-sky-600 bg-sky-50 dark:bg-sky-950/30 dark:text-sky-300"><KeyRound :size="14" /></span>
-                <span class="apple-state-copy"><strong>客户端授权码</strong><small>等同于邮箱密码，落库加密存储</small></span>
-                <span :class="statusClass(selected)" class="apple-state-status">{{ statusLabel(selected.icloud_status || selected.status) }}</span>
-              </article>
-              <article class="apple-state-row">
-                <span class="apple-state-icon text-violet-600 bg-violet-50 dark:bg-violet-950/30 dark:text-violet-300"><Server :size="14" /></span>
-                <span class="apple-state-copy"><strong>{{ selected.imap_host }}:{{ selected.imap_port || 993 }}</strong><small>账号名 {{ selected.imap_username || selected.apple_id }}</small></span>
-                <span class="apple-state-status bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300">IMAP</span>
-              </article>
-            </div>
-
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>名下地址</h3><p>默认不进邮箱池，需要时逐个勾选；勾选后邮箱池里就能看到</p></div><button class="secondary-button apple-check-button" @click="openAddAddressDialog"><Plus :size="13" />添加地址</button></header>
-              <div v-if="!selected.mailboxes?.length" class="apple-state-empty">这个邮箱下还没有地址。</div>
-              <ul v-else class="apple-alias-list">
-                <li v-for="mailbox in selected.mailboxes" :key="mailbox.id">
-                  <MailOpen :size="13" />
-                  <span class="font-mono">{{ mailbox.email }}</span>
-                  <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`pool:${mailbox.id}`)" :title="mailbox.pool_hidden ? '放进邮箱池' : '移出邮箱池，只在本页可见'" @click="togglePool(mailbox)">
-                    <LoaderCircle v-if="isBusy(`pool:${mailbox.id}`)" :size="12" class="animate-spin" />
-                    <CheckCircle2 v-else-if="!mailbox.pool_hidden" :size="12" />
-                    <Plus v-else :size="12" />
-                    {{ mailbox.pool_hidden ? '进池' : '已在池中' }}
-                  </button>
-                </li>
-              </ul>
-            </div>
-
-            <div class="apple-detail-block">
-              <header class="apple-section-heading"><div><h3>服务商说明</h3><p>这些限制来自服务商本身，不是本程序的选择</p></div></header>
-              <dl class="apple-meta-list">
-                <div><dt>IMAP 服务器</dt><dd class="font-mono">{{ selected.imap_host }}:{{ selected.imap_port || 993 }}</dd></div>
-                <div><dt>地址数量</dt><dd>{{ selected.mailbox_count || 0 }} 个，其中 {{ selected.pool_count || 0 }} 个在邮箱池</dd></div>
-                <div><dt>已收邮件</dt><dd>{{ selected.message_count || 0 }} 封</dd></div>
-              </dl>
-              <p v-if="moduleInfo.hint" class="apple-detail-hint"><AlertCircle :size="13" />{{ moduleInfo.hint }}</p>
-            </div>
-            <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
-            </div>
-          </template>
-        </aside>
       </div>
     </section>
 

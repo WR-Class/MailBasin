@@ -1,6 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Apple, CheckCircle2, CloudDownload, Eye, EyeOff, KeyRound, LoaderCircle, Mail, MailPlus, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { Apple, CheckCircle2, ChevronRight, CloudDownload, Eye, EyeOff, KeyRound, LoaderCircle, Mail, MailPlus, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import CardSelect from '../components/CardSelect.vue'
 import { useConfirm } from '../composables/useConfirm'
@@ -18,6 +18,8 @@ const showPassword = ref(true)
 const showIMAPPassword = ref(true)
 const data = ref({ items: [], module_ready: true })
 const selected = ref(null)
+// 展开块里的分区默认都折叠，和其余服务商页面保持同一套手感。
+const openSections = reactive({ states: false })
 // 列表分页：账号会越加越多，一次全渲染到页面上既慢又重，所以只取当前这一页。
 // 搜索和分页一起存在才有用：只有分页时找一条记录要点几十次「下一页」，
 // 只有搜索时一次匹配几百条又会把体积问题原样搬回来。
@@ -238,6 +240,18 @@ async function selectAccount(account) {
   }
 }
 
+// 点已经展开的那一行要收起。收起时把 IMAP 表单也清掉——它填的是上一个账号的凭据，
+// 留着下一次展开会先闪一下别人的授权码。默认不选中任何行。
+async function toggleAccount(account) {
+  if (selected.value?.id === account.id) {
+    selected.value = null
+    imap.email = ''
+    imap.app_password = ''
+    return
+  }
+  await selectAccount(account)
+}
+
 async function startLogin() {
   if (!startBusy('login')) return
   flash('正在与 Apple 建立登录态，请稍候…')
@@ -376,36 +390,56 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Apple 账号</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选择账号后可在右侧查看各通道状态</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
+          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选中一个后在它下方展开各通道状态与验证码</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
           <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Apple 账号' : '还没有 Apple 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Apple 账号”完成首次协议登录。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
               <thead><tr><th>Apple 账号</th><th>状态</th><th>登录通道</th><th>操作</th></tr></thead>
               <tbody>
-                <tr v-for="account in data.items" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id || 'Apple 账号'} 的登录态详情`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                <template v-for="account in data.items" :key="account.id">
+                <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${account.label || account.apple_id || 'Apple 账号'} 的登录态详情`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
                   <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Apple v-else :size="14" /></span><span><strong>{{ account.label || account.apple_id || 'Apple 账号' }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
                   <td><span :class="accountStatusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span v-for="state in account.login_states" :key="state.kind" class="apple-channel-pill"><component :is="stateMeta(state.kind).icon" :size="11" /><span>{{ stateLabel(state.kind) }}</span><em :class="stateStatusClass(state)">{{ stateStatusLabel(state) }}</em></span><span v-if="!account.login_states?.length" class="apple-channel-empty">暂无登录态</span></div></td>
                   <td><button type="button" class="apple-delete-button" :title="`删除 ${account.label || account.apple_id || 'Apple 账号'}`" :aria-label="`删除 ${account.label || account.apple_id || 'Apple 账号'}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
                 </tr>
+                <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
+                  <td colspan="4" class="apple-account-expand-cell">
+                    <div class="apple-account-expand-body">
+                      <!-- ① 登录态：折叠 + 就地可检测。 -->
+                      <section class="detail-section">
+                        <header class="detail-section-head">
+                          <button type="button" class="detail-section-toggle" :aria-expanded="openSections.states" @click="openSections.states = !openSections.states">
+                            <ChevronRight :size="15" class="detail-section-caret" />
+                            <span class="detail-section-title">
+                              <strong><ShieldCheck :size="15" />登录态</strong>
+                              <small>{{ selected.label || selected.apple_id }} · 各通道的登录态与最近一次检测结果</small>
+                            </span>
+                          </button>
+                          <div class="detail-section-actions">
+                            <button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '检测登录态' }}</button>
+                          </div>
+                        </header>
+                        <div v-if="openSections.states" class="detail-section-body">
+                          <div class="apple-state-list">
+                            <article v-for="state in selected.login_states" :key="state.kind" class="apple-state-row"><span :class="stateMeta(state.kind).tone" class="apple-state-icon"><component :is="stateMeta(state.kind).icon" :size="14" /></span><span class="apple-state-copy"><strong>{{ stateLabel(state.kind) }}</strong><small>{{ isBusy('check') ? `正在检查 ${stateLabel(state.kind)} 登录态…` : (state.last_status_message || stateMeta(state.kind).description) }}</small></span><span v-if="isBusy('check')" class="apple-state-checking"><LoaderCircle :size="10" class="animate-spin" />检查中</span><span v-else :class="stateStatusClass(state)" class="apple-state-status">{{ stateStatusLabel(state) }}</span></article>
+                            <div v-if="!selected.login_states?.length" class="apple-state-empty">该账号还没有已保存的登录态</div>
+                          </div>
+                        </div>
+                      </section>
+
+                      <!-- ② 邮件与验证码：默认折叠，内容由 AccountInboxPanel 自己渲染。 -->
+                      <AccountInboxPanel collapsible :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
+                    </div>
+                  </td>
+                </tr>
+                </template>
               </tbody>
             </table>
           </div>
           <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个账号" :loading="loading" @change="changePage" />
         </section>
-
-        <aside class="apple-detail-panel">
-          <div v-if="!selected" class="apple-detail-empty"><span><Apple :size="20" /></span><strong>选择一个 Apple 账号</strong><small>登录态详情和检测结果会显示在这里。</small></div>
-          <template v-else>
-            <header class="apple-detail-heading"><div><span>所选 Apple 账号</span><h3>{{ selected.label || selected.apple_id }}</h3><p>{{ selected.apple_id }}</p></div><button class="secondary-button apple-check-button" :disabled="isBusy('check')" @click="checkAccount"><LoaderCircle v-if="isBusy('check')" :size="13" class="animate-spin" /><RefreshCw v-else :size="13" />{{ isBusy('check') ? '检查中' : '检测登录态' }}</button></header>
-            <div class="apple-state-list">
-              <article v-for="state in selected.login_states" :key="state.kind" class="apple-state-row"><span :class="stateMeta(state.kind).tone" class="apple-state-icon"><component :is="stateMeta(state.kind).icon" :size="14" /></span><span class="apple-state-copy"><strong>{{ stateLabel(state.kind) }}</strong><small>{{ isBusy('check') ? `正在检查 ${stateLabel(state.kind)} 登录态…` : (state.last_status_message || stateMeta(state.kind).description) }}</small></span><span v-if="isBusy('check')" class="apple-state-checking"><LoaderCircle :size="10" class="animate-spin" />检查中</span><span v-else :class="stateStatusClass(state)" class="apple-state-status">{{ stateStatusLabel(state) }}</span></article>
-              <div v-if="!selected.login_states?.length" class="apple-state-empty">该账号还没有已保存的登录态</div>
-            </div>
-          </template>
-          <AccountInboxPanel :account-id="selected?.id || ''" :account-name="selected?.label || selected?.apple_id || ''" />
-        </aside>
       </div>
     </section>
 
