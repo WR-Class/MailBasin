@@ -254,6 +254,65 @@ func TestBackfillRejectsExternalCodeMailbox(t *testing.T) {
 	}
 }
 
+// 回填的下限必须跟着保留期走。
+//
+// 比保留期更早的邮件取回来也留不住——自动维护会按 received_at 删掉它——那次全量扫描的
+// 墙钟和写库就白费。实测里正是这样：命中 446 封、入库 169 封，紧接着那轮维护删掉了 169 封。
+func TestBackfillBoundsScansByTheRetentionWindow(t *testing.T) {
+	state := openSyncTestStore(t)
+	service := NewService(config.Default(), state)
+	mailbox := createIMAPBackfillTestMailbox(t, service)
+
+	backend := &fakeMessageSyncBackend{imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}}}
+	service.messageBackend = backend
+
+	before := time.Now()
+	if _, err := service.BackfillMailboxMessages(context.Background(), mailbox.ID); err != nil {
+		t.Fatalf("回填失败：%v", err)
+	}
+	if len(backend.imapOptions) == 0 {
+		t.Fatal("回填没有走到 IMAP 后端")
+	}
+	options := backend.imapOptions[len(backend.imapOptions)-1]
+
+	days := service.cfg.DatabaseMessageRetentionDays
+	if days <= 0 {
+		t.Fatalf("这个测试假定配置里有保留期，实际 %d", days)
+	}
+	if options.After.IsZero() {
+		t.Fatal("回填必须把保留期起点作为下限传下去，否则会去取注定被删掉的邮件")
+	}
+	want := before.AddDate(0, 0, -days)
+	if diff := options.After.Sub(want); diff > time.Minute || diff < -time.Minute {
+		t.Fatalf("下限应是「现在减去保留期 %d 天」即 %s 附近，实际 %s（差 %s）",
+			days, want.Format(time.RFC3339), options.After.Format(time.RFC3339), diff)
+	}
+}
+
+// 反向：常规增量同步不该被套上保留期下限——它本来就是从游标往后走的。
+// 少了这条，把下限加到所有路径上也能让上面那条通过。
+func TestIncrementalIMAPSyncKeepsNoRetentionFloor(t *testing.T) {
+	state := openSyncTestStore(t)
+	service := NewService(config.Default(), state)
+	mailbox := createIMAPBackfillTestMailbox(t, service)
+
+	backend := &fakeMessageSyncBackend{imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}}}
+	service.messageBackend = backend
+
+	if _, err := service.SyncIMAPMailboxWithOptions(context.Background(), mailbox.ID, MessageSyncOptions{
+		Mode: protocol.MailSyncModeVerification, Limit: 20, UseCursor: true,
+	}); err != nil {
+		t.Fatalf("增量同步失败：%v", err)
+	}
+	if len(backend.imapOptions) == 0 {
+		t.Fatal("增量同步没有走到 IMAP 后端")
+	}
+	options := backend.imapOptions[len(backend.imapOptions)-1]
+	if !options.After.IsZero() {
+		t.Fatalf("增量同步不该带保留期下限，实际 %s", options.After.Format(time.RFC3339))
+	}
+}
+
 func createIMAPBackfillTestMailbox(t *testing.T, service *Service) domain.Mailbox {
 	t.Helper()
 	account, _, err := service.CreateIMAPAccount(

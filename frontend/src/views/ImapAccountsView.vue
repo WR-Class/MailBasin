@@ -665,7 +665,7 @@ onBeforeUnmount(() => {
                             <li v-for="mailbox in selected.mailboxes" :key="mailbox.id">
                               <MailOpen :size="13" />
                               <span class="font-mono">{{ mailbox.email }}</span>
-                              <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`backfill:${mailbox.id}`)" title="把该地址服务器上已有的旧邮件取回来：不看游标，也不看最近 24 小时。邮件多时耗时较长。" @click="backfillAddress(mailbox)">
+                              <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`backfill:${mailbox.id}`)" title="把该地址服务器上已有的旧邮件取回来：不看游标，也不看最近 24 小时。只取保留期以内的邮件——更早的取回来也会被自动维护删掉。邮件多时耗时较长。" @click="backfillAddress(mailbox)">
                                 <LoaderCircle v-if="isBusy(`backfill:${mailbox.id}`)" :size="12" class="animate-spin" />
                                 <CloudDownload v-else :size="12" />
                                 {{ isBusy(`backfill:${mailbox.id}`) ? '回填中' : '回填历史' }}

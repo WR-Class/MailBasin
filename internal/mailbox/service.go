@@ -923,11 +923,29 @@ func (s *Service) syncMailboxMessagesWithOptions(ctx context.Context, mailboxID 
 	return s.SyncMailboxBatchWithOptions(ctx, mailboxes, options)
 }
 
+// backfillFloor 是回填值得往上追的最早时间，也就是保留期的起点。
+//
+// 保留期之外的东西取回来也留不住：自动维护每 24 小时（以及每次启动后一分钟）都会把
+// received_at 早于保留期的邮件删掉。实测过一次：回填命中 446 封、入库 169 封，紧接着
+// 那轮维护就按保留期删掉了 169 封——一次全量扫描的墙钟和一堆写库全白费。
+//
+// 这个下限跟着配置走而不是写死，所以在设置里把 database_message_retention_days 调大
+// 之后回填会自动够到更早的邮件，两边的口径始终一致。
+func (s *Service) backfillFloor(now time.Time) time.Time {
+	days := s.cfg.DatabaseMessageRetentionDays
+	if days <= 0 {
+		return time.Time{}
+	}
+	return now.AddDate(0, 0, -days)
+}
+
 // BackfillMailboxMessages 回填一个邮箱里已经存在的历史邮件。
 //
 // 与常规同步的区别全在选项上：FullScan 让协议层搜「全部」而不是只搜最近 24 小时，
 // 并让每个邮箱跳过「按上次同步时间算出的时间下限」；UseCursor=false 让它不从游标往后搜。
 // 少了其中任何一条，邮箱里已有的邮件都拿不到，而且失败是静默的——报告上写「成功 0」。
+//
+// After 是保留期的起点：比这更早的邮件取回来也会被自动维护删掉，所以不必取。
 //
 // 只作用在这一个邮箱，而不是一次扫全部几百个母号：后者墙钟和配额都会失控，中途失败也无从恢复。
 //
@@ -949,6 +967,7 @@ func (s *Service) BackfillMailboxMessages(ctx context.Context, mailboxID string)
 	return s.syncMailboxMessagesWithOptions(ctx, mailbox.ID, MessageSyncOptions{
 		Mode:      protocol.MailSyncModeAllRecent,
 		Trigger:   "backfill",
+		After:     s.backfillFloor(time.Now()),
 		FullScan:  true,
 		UseCursor: false,
 	})
