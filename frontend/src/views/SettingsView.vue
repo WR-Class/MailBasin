@@ -450,14 +450,19 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 确认条：点「立即更新」先展开这一条，再点一次才真的更新。这是这个按钮唯一有代价的
-             地方（会把服务停掉重启）。目标只能写到 origin/main：真正的目标提交号要等更新器
-             fetch 之后才算得出来，接口没暴露它——状态里的 from/to 是上一次运行的结果，不是预报。 -->
+             地方（会把服务停掉重启）。目标提交来自接口的 target：那是后端直接问远端分支头得到的，
+             就是更新器接下来会 reset 到的那个。取不到时退回原来的措辞，不假装知道。 -->
         <div v-if="confirmingApply && !updateApplyBusy" class="border-b border-amber-100 bg-amber-50/60 px-5 py-4 dark:border-amber-900/40 dark:bg-amber-950/20 sm:px-6">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
               <strong class="block text-sm text-slate-800 dark:text-slate-100">确认更新？</strong>
               <p class="mt-1 break-words text-xs leading-5 text-slate-500 dark:text-slate-400">
-                构建提交 {{ shortCommit(updateState.status?.current?.commit) }} → <code class="rounded bg-slate-100 px-1 dark:bg-slate-700">origin/main</code>（具体提交号要等更新器取到源码后才确定）。这一步会把服务停掉再起来，期间页面会短暂连不上，失败会自动回滚。
+                <template v-if="updateState.status?.target?.commit">
+                  构建提交 {{ shortCommit(updateState.status?.current?.commit) }} → <code class="rounded bg-slate-100 px-1 dark:bg-slate-700">{{ shortCommit(updateState.status.target.commit) }}</code>（远端 {{ updateState.status.target.branch }} 现在的位置）。这一步会把服务停掉再起来，期间页面会短暂连不上（实测约 6 秒），失败会自动回滚。
+                </template>
+                <template v-else>
+                  构建提交 {{ shortCommit(updateState.status?.current?.commit) }} → <code class="rounded bg-slate-100 px-1 dark:bg-slate-700">origin/main</code>（暂时问不到远端主干的位置，更新时会自动确定）。这一步会把服务停掉再起来，期间页面会短暂连不上，失败会自动回滚。
+                </template>
               </p>
             </div>
             <div class="flex shrink-0 gap-2">

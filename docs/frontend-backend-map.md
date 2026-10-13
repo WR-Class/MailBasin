@@ -297,7 +297,8 @@ app-shell
 
 ## 9. 已知遗留（不是 bug，是取舍）
 
-- **一键更新的确认条只写到 `origin/main`，写不出真实的「从 X 到 Y」。** 因为 `/api/update/status` 只给 `current.commit`（正在运行的），`run.from_commit`/`to_commit` 是**上一次**运行的结果，不是预报。要显示真实目标，得让更新器 fetch 后把目标写进状态、或加一个预览接口——**属于后端改动**。
+- **`/api/update/status` 的 `target` 就是「这次更新会落到哪里」的预览。** 后端直接问远端 `main` 的 `info/refs`（和 `git ls-remote` 同一条路），取到的正是更新器 `reset --hard origin/main` 会得到的那个提交——所以确认条能写出确切的「从 X 到 Y」。取不到时 `target.commit` 为空、`target.error` 说明原因，界面退回「`origin/main`」的字样，不拿分支名冒充目标。
+- **公告不是推送后立刻生效的。** 公告文件走 GitHub 的 raw CDN，而代码里那个 `?t=<时间戳>` cache-buster **不起作用**：CDN 的缓存键是路径，查询串不参与，请求头里的 `Cache-Control: no-cache` 也强制不了刷新。而且响应头带 `Vary: Accept-Encoding`，压缩与不压缩是**两个独立的缓存对象**——本服务用 Go 写、会自动发 gzip，命中的是压缩那份。实测：推送后最长 5 分钟（CDN 的 `max-age=300`）加上服务自己的 10 分钟内存缓存，约 **15 分钟**才传播到所有人。**改了版本号不要以为立刻生效**，也别用 curl 直取的结果去判断服务看到了什么（默认不发 `Accept-Encoding`，命中的是另一份缓存）。
 - **从老版本升上来、且 `data_path` 非默认值的人，第一次更新的进度卡片会是空的。** 那次跑的是**旧** `update.ps1`（PowerShell 启动时就把脚本读进内存了），旧版把状态写死在 `<repo>\data\run`，而新版服务从 `filepath.Dir(data_path)\run` 读。更新本身正常完成，只是那一次看不到进度；下一次恢复正常。默认 `data/app.db` 不受影响。
 - **锁文件**：仓库用 npm 的 `package-lock.json` 钉版本（已跟踪，是唯一凭据）。`pnpm-lock.yaml` 是构建副产品，已忽略。**统一用 npm**——混用会让新依赖进不了被跟踪的那份锁文件。重做界面本身不受影响，受影响的只有「装依赖」这一个动作。
 

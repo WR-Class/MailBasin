@@ -24,6 +24,11 @@ const (
 	requestTimeout  = 20 * time.Second
 	responseMaxSize = 4 << 20
 	githubRawURL    = "https://raw.githubusercontent.com"
+	githubWebURL    = "https://github.com"
+	// defaultBranch 是更新器会把工作树重置到的分支，以 scripts/update.ps1 的
+	// -Target 默认值 origin/main 为准。改了那边必须改这里，否则界面会写出一个
+	// 更新器根本不会去的地方。
+	defaultBranch = "main"
 )
 
 //go:embed announcements.json
@@ -48,12 +53,25 @@ type LatestInfo struct {
 	Source      string `json:"source"`
 }
 
+// TargetInfo 是「这次更新会落到哪里」的预览。
+//
+// 它不是推断：更新器做的就是 fetch origin main + reset --hard origin/main，
+// 所以这里的提交号就是它接下来会得到的那个。取不到时 Commit 留空并在 Error
+// 里说明原因——绝不用分支名或上一次的值填成看起来确定的东西，那比不知道更坏。
+type TargetInfo struct {
+	Branch    string `json:"branch"`
+	Commit    string `json:"commit"`
+	FetchedAt string `json:"fetched_at"`
+	Error     string `json:"error,omitempty"`
+}
+
 type Status struct {
 	Enabled         bool           `json:"enabled"`
 	Repository      string         `json:"repository"`
 	RepositoryURL   string         `json:"repository_url"`
 	Current         buildinfo.Info `json:"current"`
 	Latest          *LatestInfo    `json:"latest,omitempty"`
+	Target          *TargetInfo    `json:"target,omitempty"`
 	UpdateAvailable bool           `json:"update_available"`
 	CheckedAt       string         `json:"checked_at"`
 	Error           string         `json:"error,omitempty"`
@@ -65,6 +83,7 @@ type Service struct {
 	repository string
 	client     *http.Client
 	rawBaseURL string
+	webBaseURL string
 	mu         sync.Mutex
 	cachedAt   time.Time
 	cached     Status
@@ -102,6 +121,7 @@ func New(enabled bool, repository string) *Service {
 		repository: strings.Trim(strings.TrimSpace(repository), "/"),
 		client:     &http.Client{Timeout: requestTimeout},
 		rawBaseURL: githubRawURL,
+		webBaseURL: githubWebURL,
 	}
 }
 
@@ -161,6 +181,10 @@ func (s *Service) check(ctx context.Context, checkedAt time.Time) Status {
 		status.Error = "更新仓库格式不正确，应为 owner/repository"
 		return status
 	}
+
+	// 先问目标再问公告：公告走 CDN，可能被缓存住最多五分钟，而「会落到哪里」
+	// 不该跟着它一起晚到。
+	status.Target = s.checkTarget(ctx)
 
 	document, documentErr := s.fetchRepositoryDocument(ctx)
 	if documentErr != nil {
@@ -266,6 +290,120 @@ func (s *Service) get(ctx context.Context, targetURL, accept string, decode func
 		return &httpStatusError{StatusCode: response.StatusCode, Body: string(body)}
 	}
 	return decode(io.LimitReader(response.Body, responseMaxSize))
+}
+
+// checkTarget 组装「这次更新会落到哪里」的预览。
+//
+// 取不到不当作整体失败：公告读得到而分支头读不到时，让界面退回原来的措辞，
+// 比整块报错更有用。
+func (s *Service) checkTarget(ctx context.Context) *TargetInfo {
+	info := &TargetInfo{
+		Branch:    defaultBranch,
+		FetchedAt: time.Now().Format(time.RFC3339),
+	}
+	commit, err := s.fetchBranchHead(ctx, defaultBranch)
+	if err != nil {
+		info.Error = err.Error()
+		return info
+	}
+	info.Commit = commit
+	return info
+}
+
+// fetchBranchHead 问远端：这个分支现在指向哪个提交。
+//
+// 走 git 的 smart HTTP 广告（info/refs），和 git ls-remote 是同一条路：不需要
+// 令牌、没有 API 的速率限制，而且它给出的答案就是更新器接下来会 reset 到的那个。
+// 不能用 raw.githubusercontent.com——那是文件 CDN，只回答「某个文件的内容」，
+// 不回答「分支现在指向哪」。
+func (s *Service) fetchBranchHead(ctx context.Context, branch string) (string, error) {
+	target := strings.TrimRight(s.webBaseURL, "/") + "/" + s.repository + "/info/refs?service=git-upload-pack"
+	commit := ""
+	err := s.get(ctx, target, "application/x-git-upload-pack-advertisement", func(reader io.Reader) error {
+		raw, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		commit = findRefCommit(raw, "refs/heads/"+branch)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if commit == "" {
+		return "", fmt.Errorf("远端没有 refs/heads/%s", branch)
+	}
+	return commit, nil
+}
+
+// findRefCommit 从 git 的 pkt-line 广告里取出某个引用的提交号。
+//
+// 必须按长度前缀逐个包前进，不能按行切：pkt-line 之间没有换行，只有包自己的负载
+// 里可能带换行——按行切会把 flush 包和下一个包粘成一行，读到的位置整体错开四字节。
+// 这一点是测试逼出来的：假广告里 HEAD 行前面四项恰好也是十六进制，于是「按行切」
+// 那一版安静地把提交号读空了（返回空字符串，而不是报错）。
+//
+// 每个包形如：<4 位十六进制总长度><负载>，负载为
+// <40 位提交号><空格><引用名>[\0<能力列表>]。长度为 0 是 flush 包，跳过四个字节。
+func findRefCommit(raw []byte, ref string) string {
+	rest := raw
+	for len(rest) >= 4 {
+		size := hexSize(rest[:4])
+		if size < 0 {
+			return ""
+		}
+		if size == 0 {
+			rest = rest[4:]
+			continue
+		}
+		if size < 4 || size > len(rest) {
+			return ""
+		}
+		text := strings.TrimRight(string(rest[4:size]), "\n")
+		rest = rest[size:]
+		if len(text) < 40 {
+			continue
+		}
+		sha := text[:40]
+		if !isHexSHA(sha) {
+			continue
+		}
+		name := strings.TrimSpace(strings.SplitN(text[40:], "\x00", 2)[0])
+		if name == ref {
+			return sha
+		}
+	}
+	return ""
+}
+
+// hexSize 解析 4 位十六进制的包长度，非十六进制返回 -1。
+func hexSize(prefix []byte) int {
+	value := 0
+	for _, char := range prefix {
+		switch {
+		case char >= '0' && char <= '9':
+			value = value*16 + int(char-'0')
+		case char >= 'a' && char <= 'f':
+			value = value*16 + int(char-'a'+10)
+		case char >= 'A' && char <= 'F':
+			value = value*16 + int(char-'A'+10)
+		default:
+			return -1
+		}
+	}
+	return value
+}
+
+func isHexSHA(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func builtinAnnouncements() []Announcement {
