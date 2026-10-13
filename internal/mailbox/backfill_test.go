@@ -313,6 +313,47 @@ func TestIncrementalIMAPSyncKeepsNoRetentionFloor(t *testing.T) {
 	}
 }
 
+// 批量满量同步必须和单个邮箱回填用同一个保留期下限。
+//
+// 两个入口都搜 UID SEARCH ALL 的时候，两边都会把注定被自动维护删掉的邮件取回来。
+// 只锁一个入口是不够的：改好一个、漏掉另一个，正是这一条要防的形状。
+func TestBulkExistingMailboxSyncSharesTheRetentionFloor(t *testing.T) {
+	state := openSyncTestStore(t)
+	saveSyncTestAccount(t, state, "bulk-floor@icloud.com", true)
+	backend := &fakeMessageSyncBackend{
+		imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+		webResult:  protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+	}
+	service := NewService(config.Default(), state)
+	service.messageBackend = backend
+
+	before := time.Now()
+	if _, err := service.SyncExistingMailboxMessages(context.Background()); err != nil {
+		t.Fatalf("批量同步失败：%v", err)
+	}
+	imapOptions, webOptions := backend.latestOptions()
+	days := service.cfg.DatabaseMessageRetentionDays
+	if days <= 0 {
+		t.Fatalf("这个测试假定配置里有保留期，实际 %d", days)
+	}
+	want := before.AddDate(0, 0, -days)
+	for _, item := range []struct {
+		name    string
+		options protocol.MailSyncOptions
+	}{{"IMAP", imapOptions}, {"Web", webOptions}} {
+		if !item.options.FullScan || item.options.UseCursor {
+			t.Fatalf("%s 路径应当是无游标满量扫描：%+v", item.name, item.options)
+		}
+		if item.options.After.IsZero() {
+			t.Fatalf("%s 路径必须带上保留期下限，否则它会去搜 UID SEARCH ALL", item.name)
+		}
+		if diff := item.options.After.Sub(want); diff > time.Minute || diff < -time.Minute {
+			t.Fatalf("%s 路径的下限应是「现在减去保留期 %d 天」即 %s 附近，实际 %s（差 %s）",
+				item.name, days, want.Format(time.RFC3339), item.options.After.Format(time.RFC3339), diff)
+		}
+	}
+}
+
 func createIMAPBackfillTestMailbox(t *testing.T, service *Service) domain.Mailbox {
 	t.Helper()
 	account, _, err := service.CreateIMAPAccount(

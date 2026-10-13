@@ -923,15 +923,18 @@ func (s *Service) syncMailboxMessagesWithOptions(ctx context.Context, mailboxID 
 	return s.SyncMailboxBatchWithOptions(ctx, mailboxes, options)
 }
 
-// backfillFloor 是回填值得往上追的最早时间，也就是保留期的起点。
+// retentionFloor 是满量扫描值得往上追的最早时间，也就是保留期的起点。
 //
 // 保留期之外的东西取回来也留不住：自动维护每 24 小时（以及每次启动后一分钟）都会把
 // received_at 早于保留期的邮件删掉。实测过一次：回填命中 446 封、入库 169 封，紧接着
 // 那轮维护就按保留期删掉了 169 封——一次全量扫描的墙钟和一堆写库全白费。
 //
+// 两个满量入口（单个邮箱回填、批量同步已有邮箱邮件）共用它。只要有一个入口漏了，
+// 那个入口就会去搜 UID SEARCH ALL 并取回注定被删的邮件。
+//
 // 这个下限跟着配置走而不是写死，所以在设置里把 database_message_retention_days 调大
-// 之后回填会自动够到更早的邮件，两边的口径始终一致。
-func (s *Service) backfillFloor(now time.Time) time.Time {
+// 之后扫描会自动够到更早的邮件，两边的口径始终一致。
+func (s *Service) retentionFloor(now time.Time) time.Time {
 	days := s.cfg.DatabaseMessageRetentionDays
 	if days <= 0 {
 		return time.Time{}
@@ -967,7 +970,7 @@ func (s *Service) BackfillMailboxMessages(ctx context.Context, mailboxID string)
 	return s.syncMailboxMessagesWithOptions(ctx, mailbox.ID, MessageSyncOptions{
 		Mode:      protocol.MailSyncModeAllRecent,
 		Trigger:   "backfill",
-		After:     s.backfillFloor(time.Now()),
+		After:     s.retentionFloor(time.Now()),
 		FullScan:  true,
 		UseCursor: false,
 	})
@@ -1077,6 +1080,7 @@ func (s *Service) syncExistingMailboxMessageTargets(ctx context.Context, targets
 				}
 				accountResult, syncErr := s.syncGroup(ctx, job.accountID, job.mailboxes, MessageSyncOptions{
 					Mode: protocol.MailSyncModeAllRecent, Trigger: "bulk-manual",
+					After:    s.retentionFloor(time.Now()),
 					FullScan: true, UseCursor: false, AllowWebAPI: allowWebAPI, AllowFallback: allowWebAPI, UseWebComplement: allowWebAPI,
 				})
 				if syncErr != nil {
