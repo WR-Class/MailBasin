@@ -37,7 +37,10 @@ const { updateState, showChecking, loadUpdates, updateRun, updateApplyBusy, appl
 
 const updateApplyHint = computed(() => updateApplyBusy.value
   ? '更新正在进行'
-  : '取源码、本机构建、替换程序、重启并验证；任一步失败自动回滚。更新期间服务会停 5–9 秒。')
+  : '取源码、本机构建、替换程序、重启并验证；任一步失败自动回滚。更新期间服务会停约 6 秒。')
+
+// 停服务是有代价的动作，所以要点两次：第一次展开确认条，第二次才真的动手。
+const confirmingApply = ref(false)
 
 // 把更新器的状态翻译成一句人话。后端给的是 state/step，这里只负责说得准确：
 // 「拒绝」和「已回滚」都还是可用状态，「回滚未能确认」才是真正要让人紧张的。
@@ -83,6 +86,13 @@ function runDetail(run) {
 }
 
 function applyUpdateNow() {
+  // 第一次点击只展开确认条；确认条里的「确认更新」再点一次才真的调更新。
+  // 这个动作会把服务停掉重启，值得多一次点击，但不该多一次弹窗——所以做成展开式。
+  if (!confirmingApply.value) {
+    confirmingApply.value = true
+    return
+  }
+  confirmingApply.value = false
   applyUpdate().catch((error) => { applyError.value = error.message })
 }
 // 应用凭据（Microsoft / Google 的客户端 ID、密钥、租户、代理）不在这里改：
@@ -436,6 +446,24 @@ onBeforeUnmount(() => {
               <RefreshCw v-else :size="17" />
               {{ updateApplyBusy ? '正在更新' : '立即更新' }}
             </button>
+          </div>
+        </div>
+
+        <!-- 确认条：点「立即更新」先展开这一条，再点一次才真的更新。这是这个按钮唯一有代价的
+             地方（会把服务停掉重启）。目标只能写到 origin/main：真正的目标提交号要等更新器
+             fetch 之后才算得出来，接口没暴露它——状态里的 from/to 是上一次运行的结果，不是预报。 -->
+        <div v-if="confirmingApply && !updateApplyBusy" class="border-b border-amber-100 bg-amber-50/60 px-5 py-4 dark:border-amber-900/40 dark:bg-amber-950/20 sm:px-6">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <strong class="block text-sm text-slate-800 dark:text-slate-100">确认更新？</strong>
+              <p class="mt-1 break-words text-xs leading-5 text-slate-500 dark:text-slate-400">
+                构建提交 {{ shortCommit(updateState.status?.current?.commit) }} → <code class="rounded bg-slate-100 px-1 dark:bg-slate-700">origin/main</code>（具体提交号要等更新器取到源码后才确定）。这一步会把服务停掉再起来，期间页面会短暂连不上，失败会自动回滚。
+              </p>
+            </div>
+            <div class="flex shrink-0 gap-2">
+              <button type="button" class="secondary-button" @click="confirmingApply = false">取消</button>
+              <button type="button" class="primary-button" @click="applyUpdateNow">确认更新</button>
+            </div>
           </div>
         </div>
 
