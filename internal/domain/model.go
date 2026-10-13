@@ -460,9 +460,15 @@ type GoogleMailMessage struct {
 }
 
 type Dashboard struct {
+	// AccountCount 是全部服务商的账号总数。界面原先把 apple_account_count 当「账号」用，
+	// 小字却写 active_account_count——后者是在所有服务商上算的，于是卡片出现
+	// 「Apple 账号 0」配「458 个状态正常」这种自相矛盾：两个数各自都对，标签错了。
+	// 总数在这单独给出，界面就不必拿一个局部数去当全局数。
+	AccountCount          int     `json:"account_count"`
 	AppleAccountCount     int     `json:"apple_account_count"`
 	MicrosoftAccountCount int     `json:"microsoft_account_count"`
 	GoogleAccountCount    int     `json:"google_account_count"`
+	IMAPAccountCount      int     `json:"imap_account_count"`
 	ActiveAccountCount    int     `json:"active_account_count"`
 	MailboxCount          int     `json:"mailbox_count"`
 	AvailableCount        int     `json:"available_count"`

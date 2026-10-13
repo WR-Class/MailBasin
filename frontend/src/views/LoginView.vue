@@ -44,11 +44,11 @@ async function submit() {
     <div class="pointer-events-none absolute inset-0 overflow-hidden"><div class="absolute -left-28 -top-28 h-96 w-96 rounded-full bg-emerald-200/30 blur-3xl dark:bg-emerald-900/20" /><div class="absolute -bottom-40 -right-32 h-[30rem] w-[30rem] rounded-full bg-sky-200/30 blur-3xl dark:bg-sky-900/20" /></div>
     <section class="relative grid w-full max-w-5xl overflow-hidden rounded-3xl border border-white/80 bg-white shadow-2xl shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900 dark:shadow-black/20 lg:grid-cols-[1.08fr_0.92fr]">
       <div class="hidden min-h-[620px] flex-col justify-between bg-gradient-to-br from-emerald-500 via-emerald-600 to-teal-700 p-10 text-white lg:flex">
-        <div class="flex items-center gap-3"><div class="rounded-2xl bg-white/15 p-3 backdrop-blur"><Cloud :size="28" /></div><div><div class="text-lg font-black">iCloud Privacy Mail</div><div class="text-xs tracking-[0.18em] text-emerald-100">隐私邮箱控制台</div></div></div>
+        <div class="flex items-center gap-3"><div class="rounded-2xl bg-white/15 p-3 backdrop-blur"><Cloud :size="28" /></div><div><div class="text-lg font-black">MailBasin</div><div class="text-xs tracking-[0.18em] text-emerald-100">本地邮箱池</div></div></div>
         <div>
           <div class="mb-6 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold backdrop-blur"><ShieldCheck :size="15" />单用户本地模式</div>
-          <h1 class="max-w-md text-4xl font-black leading-tight">统一管理账号，<br />高效使用隐私邮箱。</h1>
-          <p class="mt-5 max-w-md text-sm leading-7 text-emerald-50/85">集中管理 Apple 账号、隐私邮箱、邮件验证码和自动创建任务。</p>
+          <h1 class="max-w-md text-4xl font-black leading-tight">多源邮箱，<br />一处收拢。</h1>
+          <p class="mt-5 max-w-md text-sm leading-7 text-emerald-50/85">Apple、微软、Google 与自有 IMAP 集中接入，邮箱池、邮件验证码与自动创建统一管理。</p>
         </div>
         <div class="grid grid-cols-3 gap-3 text-xs"><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">Go 接口</div><div class="mt-1 text-emerald-100">模块化后端</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">Vue 3</div><div class="mt-1 text-emerald-100">响应式前端</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">本地运行</div><div class="mt-1 text-emerald-100">本机优先</div></div></div>
       </div>

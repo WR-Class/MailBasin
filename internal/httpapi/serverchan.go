@@ -51,7 +51,7 @@ func (s *Server) handleServerChanTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	result, err := s.serverChan.Send(ctx, serverChanOptions(settings), serverchan.Message{
-		Title: "iCloud Privacy Mail 测试通知",
+		Title: "MailBasin 测试通知",
 		Desp:  fmt.Sprintf("这是一条 Server 酱配置测试消息。\n\n- 发送时间：%s\n- 结果：后端已成功提交推送任务", time.Now().Format("2006-01-02 15:04:05")),
 		Short: "Server 酱配置测试成功",
 	})

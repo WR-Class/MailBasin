@@ -424,6 +424,10 @@ func (s *Store) Dashboard() domain.Dashboard {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts WHERE COALESCE(json_extract(data_json, '$.provider'), 'icloud') = 'icloud'`).Scan(&out.AppleAccountCount)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts WHERE COALESCE(json_extract(data_json, '$.provider'), 'icloud') = 'microsoft'`).Scan(&out.MicrosoftAccountCount)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts WHERE COALESCE(json_extract(data_json, '$.provider'), 'icloud') = 'google'`).Scan(&out.GoogleAccountCount)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts WHERE COALESCE(json_extract(data_json, '$.provider'), 'icloud') = 'imap'`).Scan(&out.IMAPAccountCount)
+	// 总数单独查，不拿上面三个相加：那三个的 provider 过滤里没有 imap，加起来会少掉绝大多数账号
+	// （本机就是 456 个 IMAP 母号），而一个「悄悄少算」的合计数比没有合计数更坏。
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts`).Scan(&out.AccountCount)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM apple_accounts WHERE lower(json_extract(data_json, '$.status')) = 'active' OR lower(json_extract(data_json, '$.icloud_status')) = 'active'`).Scan(&out.ActiveAccountCount)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM mailboxes`).Scan(&out.MailboxCount)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM mailboxes WHERE json_extract(data_json, '$.api_active') = 1 AND json_extract(data_json, '$.icloud_active') = 1 AND lower(json_extract(data_json, '$.status')) = 'available'`).Scan(&out.AvailableCount)

@@ -1,6 +1,6 @@
-# iCloud Privacy Mail
+# MailBasin
 
-本地运行的 Apple 隐私邮箱管理工具。后端使用 Go，前端使用 Vue 3，账号、邮箱、邮件、任务和系统设置统一保存在 SQLite。
+本地运行的邮箱池管理工具：把 Apple、微软、Google 与自有 IMAP 邮箱集中接入，统一收信、取验证码、批量创建与清理。后端使用 Go，前端使用 Vue 3，账号、邮箱、邮件、任务和系统设置统一保存在 SQLite。
 
 ## 环境要求
 
@@ -229,7 +229,7 @@ Microsoft 侧走**官方 Graph API**，不需要逆向接口，也不会因为�
 1. 打开 [Azure 门户](https://portal.azure.com)，用任意 Microsoft 账号登录。
    个人账号首次进入可能提示“注册 Azure”，**不需要**创建订阅，直接跳过即可。
 2. 搜索并进入 **Microsoft Entra ID**（旧名 Azure Active Directory）→ 左侧 **应用注册** → **新注册**。
-3. 名称随便填（例如 `iCloud Privacy Mail`）。
+3. 名称随便填（例如 `MailBasin`）。
 4. **受支持的帐户类型**选：
    **“任何组织目录中的帐户和个人 Microsoft 帐户”**。
    这一项必须选对——只选单租户或仅组织目录的话，个人 outlook.com / hotmail.com 账号会授权失败。

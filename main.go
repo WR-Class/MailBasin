@@ -96,7 +96,7 @@ func runServer(options launchOptions, logger *slog.Logger) error {
 	}()
 
 	current := buildinfo.Current()
-	logger.Info("iCloud Privacy Mail v2 已启动", "地址", "http://"+server.Addr, "版本", current.Version, "提交", current.Commit, "配置", options.ConfigPath, "数据", cfg.DataPath)
+	logger.Info("MailBasin 已启动", "地址", "http://"+server.Addr, "版本", current.Version, "提交", current.Commit, "配置", options.ConfigPath, "数据", cfg.DataPath)
 	err = server.ListenAndServe()
 	if err == http.ErrServerClosed {
 		return nil
@@ -234,7 +234,7 @@ func runMenu(options *launchOptions) bool {
 	for {
 		fmt.Println()
 		fmt.Println("========================================")
-		fmt.Println("  iCloud Privacy Mail v2 启动菜单")
+		fmt.Println("  MailBasin 启动菜单")
 		fmt.Println("========================================")
 		fmt.Println("  1. 使用当前配置启动服务")
 		fmt.Println("  2. 自定义地址、端口和数据文件后启动")

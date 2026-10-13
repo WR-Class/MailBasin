@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Apple, ArrowRight, Boxes, CheckCircle2, CircleAlert, Inbox, LoaderCircle, MailCheck, MessageSquareText, ShieldCheck, Timer, Trash2 } from '@lucide/vue'
+import { Apple, ArrowRight, Boxes, CheckCircle2, CircleAlert, Inbox, LoaderCircle, MailCheck, MessageSquareText, ShieldCheck, Timer, Trash2, Users } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -26,8 +26,25 @@ let eventRefreshing = false
 const { error: showError, success: showSuccess } = useToast()
 const { confirm: confirmAction } = useConfirm()
 
+// 这张卡以前是「Apple 账号 / apple_account_count / active_account_count 个状态正常」。
+// 数字都没错，标签错了：active_account_count 是在所有服务商上算的，于是出现
+// 「Apple 账号 0」配「458 个状态正常」——本机 458 个账号里 456 个是 IMAP 母号，Apple 是 0。
+// 现在标签跟真实口径走：总数是全服务商的，小字把构成拆开说清。0 个的服务商不列，
+// 因为把不存在的项列出来是噪音。
+const accountBreakdown = computed(() => {
+  const source = dashboard.value || {}
+  const parts = [
+    ['Apple', source.apple_account_count || 0],
+    ['微软', source.microsoft_account_count || 0],
+    ['Google', source.google_account_count || 0],
+    ['IMAP', source.imap_account_count || 0],
+  ].filter(([, count]) => count > 0)
+  if (!parts.length) return '还没有账号'
+  return parts.map(([name, count]) => `${name} ${count}`).join(' · ')
+})
+
 const cards = computed(() => [
-  { label: 'Apple 账号', value: dashboard.value.apple_account_count || 0, detail: `${dashboard.value.active_account_count || 0} 个状态正常`, icon: Apple, tone: 'text-slate-700 bg-slate-100 dark:bg-slate-700 dark:text-slate-200' },
+  { label: '账号', value: dashboard.value.account_count || 0, detail: accountBreakdown.value, icon: Users, tone: 'text-slate-700 bg-slate-100 dark:bg-slate-700 dark:text-slate-200' },
   { label: '隐私邮箱', value: dashboard.value.mailbox_count || 0, detail: `${dashboard.value.available_count || 0} 个可用`, icon: Boxes, tone: 'text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 dark:text-emerald-300' },
   { label: '本地邮件', value: dashboard.value.message_count || 0, detail: '本地缓存的邮件记录', icon: MessageSquareText, tone: 'text-sky-600 bg-sky-50 dark:bg-sky-950/40 dark:text-sky-300' },
 ])

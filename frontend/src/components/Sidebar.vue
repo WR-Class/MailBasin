@@ -48,8 +48,8 @@ const drawerClass = computed(() => props.open ? 'sidebar-open' : 'sidebar-closed
           <Cloud :size="21" />
         </div>
         <div class="brand-copy">
-          <strong>Privacy Mail</strong>
-          <span>本地控制台</span>
+          <strong>MailBasin</strong>
+          <span>本地邮箱池</span>
         </div>
       </RouterLink>
       <button class="sidebar-close" title="关闭导航" aria-label="关闭导航" @click="emit('close')"><X :size="18" /></button>

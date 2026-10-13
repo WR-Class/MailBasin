@@ -48,7 +48,7 @@ const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
-  document.title = `${to.meta.title || 'iCloud Privacy Mail'} · iCloud Privacy Mail`
+  document.title = `${to.meta.title || 'MailBasin'} · MailBasin`
   const state = await loadAuthStatus()
   if (to.meta.public) {
     if (to.name === 'login' && state.authenticated) return { name: 'dashboard' }
