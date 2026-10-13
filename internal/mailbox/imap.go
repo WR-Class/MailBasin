@@ -183,6 +183,18 @@ func (s *Service) probeIMAPCredentials(host string, port int, username, secret s
 	return "服务器可达，且已用该授权码登录成功"
 }
 
+// IMAPMailboxSyncReport 如实带回一次 IMAP 邮箱同步的规模：扫了多少、匹配了多少、入库多少。
+//
+// 以前这里只回一个 int（入库数），服务层就顺手把它当成「扫描数」往上填，
+// 于是报告里的「扫描」其实是入库数、「匹配」永远是 0。实测里那个 0 差点让人
+// 把「服务器返回了 446 个 UID」读成「服务器什么都没返回」。
+// 名字和值必须是同一件事，否则报告比没有报告更危险。
+type IMAPMailboxSyncReport struct {
+	Stored  int
+	Scanned int
+	Matched int
+}
+
 // SyncIMAPMailbox 用邮箱自己的 IMAP 凭据读一次收件箱，把新邮件落进消息表。
 //
 // 落库走的是和 iCloud / Gmail / Outlook 完全相同的那条消息表，
@@ -190,11 +202,12 @@ func (s *Service) probeIMAPCredentials(host string, port int, username, secret s
 //
 // 这里只做增量：只看游标之后的新邮件。全量回填走 SyncIMAPMailboxWithOptions。
 func (s *Service) SyncIMAPMailbox(ctx context.Context, mailboxID string) (int, error) {
-	return s.SyncIMAPMailboxWithOptions(ctx, mailboxID, MessageSyncOptions{
+	report, err := s.SyncIMAPMailboxWithOptions(ctx, mailboxID, MessageSyncOptions{
 		Mode:      protocol.MailSyncModeVerification,
 		Limit:     s.cfg.MailWatcherFetchLimit,
 		UseCursor: true,
 	})
+	return report.Stored, err
 }
 
 // SyncIMAPMailboxWithOptions 按调用方给的选项同步一个 IMAP 取码邮箱。
@@ -207,16 +220,16 @@ func (s *Service) SyncIMAPMailbox(ctx context.Context, mailboxID string) (int, e
 // 全量模式下不推进游标：扫描可能因为超时或单批失败而只完成一部分，
 // 此时把游标推到最新 UID 会让没扫到的那一段永远够不到——这正是要修的毛病。
 // 不推进游标的代价只是下次增量同步会重扫一段，而落库按远端 ID 去重，是安全的。
-func (s *Service) SyncIMAPMailboxWithOptions(ctx context.Context, mailboxID string, options MessageSyncOptions) (int, error) {
+func (s *Service) SyncIMAPMailboxWithOptions(ctx context.Context, mailboxID string, options MessageSyncOptions) (IMAPMailboxSyncReport, error) {
 	mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID))
 	if !ok {
-		return 0, errors.New("邮箱不存在")
+		return IMAPMailboxSyncReport{}, errors.New("邮箱不存在")
 	}
 	if mailbox.ProviderOrDefault() != domain.ProviderIMAP {
-		return 0, errors.New("该邮箱不是 IMAP 取码邮箱")
+		return IMAPMailboxSyncReport{}, errors.New("该邮箱不是 IMAP 取码邮箱")
 	}
 	if strings.TrimSpace(mailbox.IMAPHost) == "" || strings.TrimSpace(mailbox.IMAPSecret) == "" {
-		return 0, errors.New("该邮箱没有保存 IMAP 连接信息，请重新导入")
+		return IMAPMailboxSyncReport{}, errors.New("该邮箱没有保存 IMAP 连接信息，请重新导入")
 	}
 	state := protocol.LoginState{
 		Kind:            "imap",
@@ -246,7 +259,7 @@ func (s *Service) SyncIMAPMailboxWithOptions(ctx context.Context, mailboxID stri
 		CursorUID: cursorUID,
 	})
 	if err != nil {
-		return 0, err
+		return IMAPMailboxSyncReport{}, err
 	}
 	lastUID := result.LastUID
 	if options.FullScan && result.FailedBatches > 0 {
@@ -269,12 +282,13 @@ func (s *Service) SyncIMAPMailboxWithOptions(ctx context.Context, mailboxID stri
 	}
 	created, err := s.store.ApplyMailboxSyncBatch([]store.MailboxSyncUpdate{update})
 	if err != nil {
-		return 0, err
+		return IMAPMailboxSyncReport{}, err
 	}
+	report := IMAPMailboxSyncReport{Stored: created, Scanned: result.Scanned, Matched: result.Matched}
 	if options.FullScan && result.FailedBatches > 0 {
-		return created, protocol.NewCodedError("imap_partial_scan", fmt.Sprintf("回填只完成了一部分：有 %d 批邮件没取到，已保存取到的 %d 封，游标未推进，可以再点一次继续", result.FailedBatches, created), true)
+		return report, protocol.NewCodedError("imap_partial_scan", fmt.Sprintf("回填只完成了一部分：有 %d 批邮件没取到，已保存取到的 %d 封，游标未推进，可以再点一次继续", result.FailedBatches, created), true)
 	}
-	return created, nil
+	return report, nil
 }
 
 // SyncAllIMAPMailboxes 依次同步全部 IMAP 取码邮箱，返回成功取到新邮件的邮箱数。

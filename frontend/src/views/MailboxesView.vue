@@ -1775,7 +1775,7 @@ onBeforeUnmount(() => {
           <div class="grid grid-cols-2 gap-2">
             <button class="detail-button detail-button-primary" :disabled="isBusy('sync') || isMailboxDeleteBusy(selected.id)" :title="mailboxMessageSyncHint" @click="syncMailbox"><RefreshCw :size="14" :class="isBusy('sync') ? 'animate-spin' : ''" />同步邮件</button>
             <button class="detail-button detail-button-secondary" :disabled="isBusy('code') || isMailboxDeleteBusy(selected.id)" @click="getCode"><LoaderCircle v-if="codeBusyVisible === 'code'" :size="14" class="animate-spin" /><KeyRound v-else :size="14" />获取验证码</button>
-            <button class="detail-button detail-button-secondary col-span-2" :disabled="isBusy('backfill') || isMailboxDeleteBusy(selected.id)" :title="mailboxBackfillHint" @click="backfillMailbox"><LoaderCircle v-if="isBusy('backfill')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('backfill') ? '正在回填历史邮件' : '回填历史邮件' }}</button>
+            <button v-if="selected.provider !== 'external'" class="detail-button detail-button-secondary col-span-2" :disabled="isBusy('backfill') || isMailboxDeleteBusy(selected.id)" :title="mailboxBackfillHint" @click="backfillMailbox"><LoaderCircle v-if="isBusy('backfill')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('backfill') ? '正在回填历史邮件' : '回填历史邮件' }}</button>
           </div>
 
           <form class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900" @submit.prevent="saveStatus">

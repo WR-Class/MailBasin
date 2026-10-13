@@ -190,6 +190,70 @@ func TestBackfillStoresReturnedMessages(t *testing.T) {
 	}
 }
 
+// 报告里「扫描」必须是扫描数、不是入库数，「匹配」也必须是匹配数、不是恒为 0。
+//
+// 这条锁死的是「拿入库数冒充扫描数」那种改法。它曾经把
+// 「服务器返回了 446 个 UID」读成「服务器什么都没返回」——报告上的名字和值
+// 不是一回事时，看一眼数字就会得出相反的结论。
+func TestBackfillReportsScannedAndMatchedNotTheStoredCount(t *testing.T) {
+	state := openSyncTestStore(t)
+	service := NewService(config.Default(), state)
+	mailbox := createIMAPBackfillTestMailbox(t, service)
+
+	receivedAt := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	backend := &fakeMessageSyncBackend{imapResult: protocol.MailSyncBatchResult{
+		MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID: "imap:9", RemoteIDs: []string{"imap:9"}, CanonicalID: "message-id:report@example.invalid",
+				Source: "imap", UID: "9", Subject: "Login verification code",
+				Body: "Your verification code is 111111.", ContentType: "text/plain", ReceivedAt: receivedAt,
+			}},
+		},
+		Scanned: 9,
+		Matched: 7,
+	}}
+	service.messageBackend = backend
+
+	result, err := service.BackfillMailboxMessages(context.Background(), mailbox.ID)
+	if err != nil {
+		t.Fatalf("回填失败：%v", err)
+	}
+	if result.SyncedMessages != 1 {
+		t.Fatalf("应入库 1 封，实际 %d", result.SyncedMessages)
+	}
+	if result.Scanned != 9 {
+		t.Fatalf("「扫描」应是后端返回的 9，实际 %d；拿入库数冒充时它会等于入库数 %d", result.Scanned, result.SyncedMessages)
+	}
+	if result.Matched != 7 {
+		t.Fatalf("「匹配」应是后端返回的 7，实际 %d", result.Matched)
+	}
+}
+
+// 外部取码邮箱没有收件箱，回填必须如实拒绝。
+//
+// 以前它会静默走一遍普通同步、把 FullScan 丢掉，而界面那个按钮写着
+// 「取回服务器上已有的旧邮件」——参数被丢掉、标签照着念，正是这里要消掉的不一致。
+func TestBackfillRejectsExternalCodeMailbox(t *testing.T) {
+	state := openSyncTestStore(t)
+	service := NewService(config.Default(), state)
+	const address = "external-backfill@example.invalid"
+	if _, err := service.ImportExternalMailboxes([]ExternalMailboxInput{{
+		Email: address, CodeAPIURL: "https://host/access/token/mailboxes/" + address + "/code",
+	}}); err != nil {
+		t.Fatalf("导入外部取码邮箱失败：%v", err)
+	}
+	mailbox, ok := service.store.FindMailboxByEmail(address)
+	if !ok {
+		t.Fatal("外部取码邮箱没有导入")
+	}
+
+	if _, err := service.BackfillMailboxMessages(context.Background(), mailbox.ID); err == nil {
+		t.Fatal("对外部取码邮箱回填应当明确报错，而不是静默成功")
+	} else if code, _, _ := protocol.ErrorDetails(err); code != "external_has_no_mailbox" {
+		t.Fatalf("错误码应是 external_has_no_mailbox，实际 %q（%v）", code, err)
+	}
+}
+
 func createIMAPBackfillTestMailbox(t *testing.T, service *Service) domain.Mailbox {
 	t.Helper()
 	account, _, err := service.CreateIMAPAccount(

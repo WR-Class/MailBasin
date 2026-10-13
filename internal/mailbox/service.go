@@ -930,10 +930,21 @@ func (s *Service) syncMailboxMessagesWithOptions(ctx context.Context, mailboxID 
 // 少了其中任何一条，邮箱里已有的邮件都拿不到，而且失败是静默的——报告上写「成功 0」。
 //
 // 只作用在这一个邮箱，而不是一次扫全部几百个母号：后者墙钟和配额都会失控，中途失败也无从恢复。
+//
+// 外部取码邮箱在这里如实拒绝：它读的是第三方取码接口，没有收件箱，也就没有「历史邮件」
+// 可回填。以前它会静默走一遍普通同步，界面上那个按钮却写着「取回服务器上已有的旧邮件」——
+// 参数被丢掉、标签照着念，是这里最该消掉的一种不一致。
 func (s *Service) BackfillMailboxMessages(ctx context.Context, mailboxID string) (MailboxMessageSyncBatchResult, error) {
 	mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID))
 	if !ok {
 		return MailboxMessageSyncBatchResult{}, errors.New("邮箱不存在")
+	}
+	if mailbox.ProviderOrDefault() == domain.ProviderExternal {
+		return MailboxMessageSyncBatchResult{}, protocol.NewCodedError(
+			"external_has_no_mailbox",
+			"外部取码邮箱没有历史邮件可回填：它读的是第三方取码接口，没有收件箱。要取码请用「同步邮件」或「获取验证码」。",
+			false,
+		)
 	}
 	return s.syncMailboxMessagesWithOptions(ctx, mailbox.ID, MessageSyncOptions{
 		Mode:      protocol.MailSyncModeAllRecent,
@@ -1325,21 +1336,29 @@ func (s *Service) syncGroup(ctx context.Context, key string, mailboxes []domain.
 func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailbox, options MessageSyncOptions, accountResult AccountMessageSyncResult) (AccountMessageSyncResult, error) {
 	accountResult.Method = "imap"
 	stored := 0
+	scanned := 0
+	matched := 0
 	var failures []string
 	for _, mailbox := range mailboxes {
 		if err := ctx.Err(); err != nil {
 			return accountResult, err
 		}
-		count, err := s.SyncIMAPMailboxWithOptions(ctx, mailbox.ID, options)
+		report, err := s.SyncIMAPMailboxWithOptions(ctx, mailbox.ID, options)
 		if err != nil {
 			code, message, _ := protocol.ErrorDetails(err)
 			failures = append(failures, mailbox.Email+"（"+firstNonEmpty(code, message)+"）")
 			continue
 		}
-		stored += count
+		stored += report.Stored
+		scanned += report.Scanned
+		matched += report.Matched
 	}
+	// 这三个数各是各的：扫了多少、匹配了多少、最后入库多少。
+	// 曾经这里是 Scanned += stored，于是「扫描」报的是入库数、匹配恒为 0——
+	// 名字和值不是一回事的报告，比没有报告更容易把人带沟里。
 	accountResult.SyncedMessages += stored
-	accountResult.Scanned += stored
+	accountResult.Scanned += scanned
+	accountResult.Matched += matched
 	accountID := strings.TrimSpace(accountResult.AccountID)
 	if len(failures) == len(mailboxes) && len(mailboxes) > 0 {
 		// 全军覆没多半是授权码或服务器地址的问题，如实标出来而不是留个「正常」。
@@ -1380,7 +1399,9 @@ func (s *Service) syncExternalGroupNow(ctx context.Context, mailboxes []domain.M
 		stored += count
 	}
 	accountResult.SyncedMessages += stored
-	accountResult.Scanned += stored
+	// 这里不再把入库数填给「扫描」：外部取码邮箱读的是第三方取码接口，
+	// 它没有收件箱、没有「扫了多少封」这回事。填一个好看的数字就是撒谎，
+	// 界面上「扫描 0」才是实话；这次拿到什么看 synced_messages。
 	if len(failures) == len(mailboxes) && len(mailboxes) > 0 {
 		// 全部失败多半是取码地址或令牌的问题，如实报出来，而不是留个「同步完成 0」。
 		return accountResult, errors.New("全部地址同步失败：" + strings.Join(failures, "，"))
