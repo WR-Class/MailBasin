@@ -45,6 +45,8 @@ const updateRunView = computed(() => {
   if (applyError.value) return { tone: 'bad', title: '没能启动更新', message: applyError.value, detail: '' }
   const run = updateRun.value
   if (!run) return null
+  // 「已经请求了、更新器还没报出第一步」是独立的一档：既不是还没有动作，也不是正在跑。
+  if (run.state === 'pending') return { tone: 'running', title: '正在启动更新…', message: run.message || '—', detail: '' }
   const detail = runDetail(run)
   if (run.running) return { tone: 'running', title: `正在更新：${run.step || '准备'}`, message: run.message || '—', detail }
   switch (run.state) {
