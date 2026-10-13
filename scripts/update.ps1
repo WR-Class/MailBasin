@@ -211,22 +211,28 @@ function Invoke-Rollback {
     Write-Log ("不需要回滚：还没动过源码或可执行文件（{0}）" -f $Reason)
     return 'noop'
   }
-  Write-Status -Step 'rollback' -Message ("失败，正在回滚：{0}" -f $Reason)
+  # 服务只在「真的被动过」的时候才停/起。构建失败就是没被动过的典型：可执行文件没换、
+  # 服务也没停过。这时候去停一次再起一次，等于白造一次停机，而且什么都没修。
+  $serviceTouched = $script:Swapped
 
-  [void](Invoke-ServerCmd 'stop')
+  if ($serviceTouched) {
+    [void](Invoke-ServerCmd 'stop')
 
-  # 优先用换下来的那个（一次同目录改名，内容必然一致）；退而用按版本存的快照。
-  if (Test-Path $OldExe) {
-    Move-Item -Force $OldExe $Exe
-    Write-Log "已用 ipm-server.exe.old 还原可执行文件"
-  } elseif (Test-Path $script:BackupExe) {
-    Copy-Item -Force $script:BackupExe $Exe
-    Write-Log ("已用备份还原可执行文件：{0}" -f $script:BackupExe)
+    # 优先用换下来的那个（一次同目录改名，内容必然一致）；退而用按版本存的快照。
+    if (Test-Path $OldExe) {
+      Move-Item -Force $OldExe $Exe
+      Write-Log "已用 ipm-server.exe.old 还原可执行文件"
+    } elseif (Test-Path $script:BackupExe) {
+      Copy-Item -Force $script:BackupExe $Exe
+      Write-Log ("已用备份还原可执行文件：{0}" -f $script:BackupExe)
+    } else {
+      # 走到这里说明前置条件没守住（没有备份就换了）。必须大声说出来，不能假装回滚成功。
+      throw "没有可用的旧版本可执行文件，无法回滚。原提交是 $($script:FromCommit)"
+    }
+    $script:Swapped = $false
   } else {
-    # 走到这里说明前置条件没守住（没有备份就换了）。必须大声说出来，不能假装回滚成功。
-    throw "没有可用的旧版本可执行文件，无法回滚。原提交是 $($script:FromCommit)"
+    Write-Log '可执行文件从未被替换、服务也从未被停过：不动它，只把源码指针退回去'
   }
-  $script:Swapped = $false
 
   if ($script:TreeMoved) {
     [void](Invoke-Git @('reset', '--hard', $script:FromCommit))
@@ -234,7 +240,9 @@ function Invoke-Rollback {
     Write-Log ("源码指针已退回 {0}" -f $script:FromCommit)
   }
 
-  [void](Invoke-ServerCmd 'start')
+  if ($serviceTouched) {
+    [void](Invoke-ServerCmd 'start')
+  }
   $live = Wait-HealthCommit -Seconds $VerifySeconds
   if ($live -eq $script:FromCommit) {
     Write-Log ("回滚完成，旧版本已在运行：{0}" -f $live)
@@ -342,6 +350,10 @@ function Invoke-UpdateTask {
   if ($live -ne $script:ToCommit) {
     throw ("新版本没能确认在运行：期望 {0}，实际 {1}" -f $script:ToCommit, $live)
   }
+
+  # 装配成功了，换下来的那个就没用了：它只是本次运行里的快捷退路，留着等于每次
+  # 更新都白占 13.8 MB。按版本存的备份仍在 bin\backup 里，回滚不依赖它。
+  Remove-Item -Force $OldExe -ErrorAction SilentlyContinue
 
   Write-Log ("更新完成：{0} -> {1}" -f $script:FromCommit, $live)
   Write-Status -Step 'done' -State 'done' -Message ("已更新到 {0}" -f $live.Substring(0, 12))
