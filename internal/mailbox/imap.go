@@ -187,7 +187,27 @@ func (s *Service) probeIMAPCredentials(host string, port int, username, secret s
 //
 // 落库走的是和 iCloud / Gmail / Outlook 完全相同的那条消息表，
 // 所以取码、租约、导出这些下游路径不需要任何改动。
+//
+// 这里只做增量：只看游标之后的新邮件。全量回填走 SyncIMAPMailboxWithOptions。
 func (s *Service) SyncIMAPMailbox(ctx context.Context, mailboxID string) (int, error) {
+	return s.SyncIMAPMailboxWithOptions(ctx, mailboxID, MessageSyncOptions{
+		Mode:      protocol.MailSyncModeVerification,
+		Limit:     s.cfg.MailWatcherFetchLimit,
+		UseCursor: true,
+	})
+}
+
+// SyncIMAPMailboxWithOptions 按调用方给的选项同步一个 IMAP 取码邮箱。
+//
+// 这个函数存在的理由：原来的 SyncIMAPMailbox 把模式、上限、游标全部硬编码了，
+// 于是「全量」这个意图到了这一层就被丢掉——上游明明把它传了下来，函数却不接收。
+// 结果是回填按钮对 IMAP 邮箱永远只搜游标之后那一段，旧邮件拿不到，
+// 而报告上写的是「成功 0」，看不出是被谁丢的。
+//
+// 全量模式下不推进游标：扫描可能因为超时或单批失败而只完成一部分，
+// 此时把游标推到最新 UID 会让没扫到的那一段永远够不到——这正是要修的毛病。
+// 不推进游标的代价只是下次增量同步会重扫一段，而落库按远端 ID 去重，是安全的。
+func (s *Service) SyncIMAPMailboxWithOptions(ctx context.Context, mailboxID string, options MessageSyncOptions) (int, error) {
 	mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID))
 	if !ok {
 		return 0, errors.New("邮箱不存在")
@@ -206,16 +226,33 @@ func (s *Service) SyncIMAPMailbox(ctx context.Context, mailboxID string) (int, e
 		IMAPPort:        mailbox.IMAPPort,
 		IMAPAppPassword: strings.TrimSpace(mailbox.IMAPSecret),
 	}
-	result, err := protocol.SyncICloudIMAPMessagesWithOptions(ctx, state, []domain.Mailbox{mailbox}, protocol.MailSyncOptions{
-		Mode:      protocol.MailSyncModeVerification,
-		Limit:     s.cfg.MailWatcherFetchLimit,
-		UseCursor: true,
-		CursorUID: mailbox.LastSyncUID,
+	useCursor := options.UseCursor && !options.FullScan
+	cursorUID := ""
+	if useCursor {
+		cursorUID = mailbox.LastSyncUID
+	}
+	// 走和其它服务商同一条后端接口，而不是直接调协议层：
+	// 这样这一层才能被替换，参数是否真的传到了最底层也才测得到。
+	backend := s.messageBackend
+	if backend == nil {
+		backend = defaultMessageSyncBackend{client: s.client}
+	}
+	result, err := backend.SyncIMAP(ctx, state, []domain.Mailbox{mailbox}, protocol.MailSyncOptions{
+		Mode:      options.Mode,
+		After:     options.After,
+		Limit:     options.Limit,
+		FullScan:  options.FullScan,
+		UseCursor: useCursor,
+		CursorUID: cursorUID,
 	})
 	if err != nil {
 		return 0, err
 	}
-	update := store.MailboxSyncUpdate{MailboxID: mailbox.ID, SyncedAt: time.Now(), LastUID: result.LastUID}
+	lastUID := result.LastUID
+	if options.FullScan && result.FailedBatches > 0 {
+		lastUID = ""
+	}
+	update := store.MailboxSyncUpdate{MailboxID: mailbox.ID, SyncedAt: time.Now(), LastUID: lastUID}
 	for _, message := range result.MessagesByMailbox[mailbox.ID] {
 		update.Messages = append(update.Messages, store.MailboxSyncMessage{
 			RemoteID:    message.RemoteID,
@@ -230,7 +267,14 @@ func (s *Service) SyncIMAPMailbox(ctx context.Context, mailboxID string) (int, e
 			ReceivedAt:  message.ReceivedAt,
 		})
 	}
-	return s.store.ApplyMailboxSyncBatch([]store.MailboxSyncUpdate{update})
+	created, err := s.store.ApplyMailboxSyncBatch([]store.MailboxSyncUpdate{update})
+	if err != nil {
+		return 0, err
+	}
+	if options.FullScan && result.FailedBatches > 0 {
+		return created, protocol.NewCodedError("imap_partial_scan", fmt.Sprintf("回填只完成了一部分：有 %d 批邮件没取到，已保存取到的 %d 封，游标未推进，可以再点一次继续", result.FailedBatches, created), true)
+	}
+	return created, nil
 }
 
 // SyncAllIMAPMailboxes 依次同步全部 IMAP 取码邮箱，返回成功取到新邮件的邮箱数。

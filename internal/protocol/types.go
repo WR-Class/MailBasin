@@ -33,6 +33,11 @@ func errCode(code, message string, retryable bool) error {
 	return Error{code: code, message: message, retryable: retryable}
 }
 
+// NewCodedError 供其它包构造带错误码的错误，让上层能按码分支并保持 HTTP 状态正确。
+func NewCodedError(code, message string, retryable bool) error {
+	return errCode(code, message, retryable)
+}
+
 func ErrorDetails(err error) (code, message string, retryable bool) {
 	var coded Error
 	if errors.As(err, &coded) {

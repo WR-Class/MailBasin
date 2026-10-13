@@ -888,10 +888,21 @@ func syncICloudIMAPMessages(ctx context.Context, state LoginState, mailboxes []M
 	if options.FullScan {
 		uidBatches = chunkInts(uids, 200)
 	}
+	failedBatches := 0
 	for _, uidBatch := range uidBatches {
 		batchMessages, batchScanned, fetchErr := fetchAndMatchICloudIMAPMessages(conn, reader, &tag, uidBatch, mailboxes, options, keyword, state)
 		if fetchErr != nil {
-			return iCloudIMAPSyncResult{}, fetchErr
+			if !options.FullScan {
+				return iCloudIMAPSyncResult{}, fetchErr
+			}
+			// 全量回填要跨很多批，单批失败不该把已经取到的部分一起丢掉。
+			// 次数报给调用方，由它决定不推进游标。
+			failedBatches++
+			if ctx.Err() != nil {
+				// 上下文已结束（超时或取消），再试下去只会白等。
+				break
+			}
+			continue
 		}
 		scanned += batchScanned
 		for mailboxID, items := range batchMessages {
@@ -907,25 +918,56 @@ func syncICloudIMAPMessages(ctx context.Context, state LoginState, mailboxes []M
 		Matched:           countMatchedMessages(messages),
 		HasMore:           !options.FullScan && totalUIDs > len(uids),
 		InitializedCursor: initializedCursor,
+		FailedBatches:     failedBatches,
 	}, nil
 }
 
 func fetchAndMatchICloudIMAPMessages(conn net.Conn, reader *bufio.Reader, tag *int, uids []int, mailboxes []Mailbox, options MailSyncOptions, keyword string, state LoginState) (map[string][]ICloudSyncedMessage, int, error) {
-	previews, err := fetchICloudIMAPRawMessages(conn, reader, tag, uids, 20, 64<<10)
+	headers, err := fetchICloudIMAPHeaderMessages(conn, reader, tag, uids, 40)
 	if err != nil {
 		return nil, 0, err
 	}
-	previewMatches := iCloudIMAPMessagesByMailbox(previews, mailboxes, options.After, keyword, options.VerificationOnly(), state.IMAPEmail, state.IMAPUsername)
-	matchedUIDs := matchedIMAPUIDs(previewMatches)
-	fetched := previews
-	if len(matchedUIDs) > 0 {
-		fetched, err = fetchICloudIMAPRawMessages(conn, reader, tag, matchedUIDs, 8, 4<<20)
+	candidateUIDs := imapCandidateUIDs(headers, mailboxes, options, state.IMAPEmail, state.IMAPUsername)
+	if len(candidateUIDs) == 0 {
+		// 没有候选就直接收工，不要退回去拿头部结果当最终结果：头部里没有正文，
+		// 那样会落库一封空正文的邮件——比少存一封更难发现。
+		return map[string][]ICloudSyncedMessage{}, len(headers), nil
+	}
+	fetched, err := fetchICloudIMAPRawMessages(conn, reader, tag, candidateUIDs, 8, 4<<20)
+	if err != nil {
+		return nil, 0, err
+	}
+	messages := iCloudIMAPMessagesByMailbox(fetched, mailboxes, options, keyword, state.IMAPEmail, state.IMAPUsername)
+	return messages, len(headers), nil
+}
+
+// fetchICloudIMAPHeaderMessages 只取头部字段。
+//
+// 全量回填要过几千封邮件，而判定「这封值不值得拉正文」只需要收件人、主题和日期。
+// HEADER.FIELDS 让服务器只回这几个字段，一封通常一两 KB；而取正文那一路的部分获取
+// 上限是 64 KB——对带附件的邮件，那个上限就是实打实要传的量。
+func fetchICloudIMAPHeaderMessages(conn net.Conn, reader *bufio.Reader, tag *int, uids []int, chunkSize int) ([]iCloudIMAPFetchedMessage, error) {
+	fetched := make([]iCloudIMAPFetchedMessage, 0, len(uids))
+	for _, chunk := range chunkInts(uids, chunkSize) {
+		*tag++
+		tagName := fmt.Sprintf("A%03d", *tag)
+		command := fmt.Sprintf("UID FETCH %s (UID BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)])", imapUIDSet(chunk))
+		lines, literals, err := imapCommandWithLiterals(conn, reader, tagName, command)
 		if err != nil {
-			return nil, 0, err
+			return nil, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件头部失败："+err.Error(), true)
+		}
+		if !imapTaggedOK(lines, tagName) {
+			return nil, errCode("imap_fetch_failed", "读取 iCloud IMAP 邮件头部失败："+imapResponseSummary(lines), true)
+		}
+		fetchUIDs := imapFetchUIDs(lines)
+		for index, raw := range literals {
+			if index >= len(fetchUIDs) {
+				continue
+			}
+			fetched = append(fetched, iCloudIMAPFetchedMessage{UID: strconv.Itoa(fetchUIDs[index]), Raw: raw})
 		}
 	}
-	messages := iCloudIMAPMessagesByMailbox(fetched, mailboxes, options.After, keyword, options.VerificationOnly(), state.IMAPEmail, state.IMAPUsername)
-	return messages, len(previews), nil
+	return fetched, nil
 }
 
 func fetchICloudIMAPRawMessages(conn net.Conn, reader *bufio.Reader, tag *int, uids []int, chunkSize, byteLimit int) ([]iCloudIMAPFetchedMessage, error) {
@@ -955,18 +997,42 @@ func fetchICloudIMAPRawMessages(conn net.Conn, reader *bufio.Reader, tag *int, u
 	return fetched, nil
 }
 
-func matchedIMAPUIDs(messages map[string][]ICloudSyncedMessage) []int {
+// imapCandidateUIDs 从「只有头部」的第一轮结果里挑出值得拉正文的 UID。
+//
+// 这里刻意只做头部就能判定的过滤：收件人是否匹配、时间是否落在范围内。
+// 「像不像验证码」不在这里判——它要读正文（extractOTP 读的就是正文），
+// 只拿头部去判会把「主题没提验证码、码在正文里」的邮件静默丢掉，
+// 而那种邮件恰恰是这个工具存在的理由。
+func imapCandidateUIDs(headers []iCloudIMAPFetchedMessage, mailboxes []Mailbox, options MailSyncOptions, ignoredEmails ...string) []int {
+	aliases, afterByMailbox := imapMailboxScope(mailboxes, options, time.Now(), ignoredEmails...)
 	seen := make(map[int]bool)
 	var uids []int
-	for _, items := range messages {
-		for _, message := range items {
-			uid := imapUIDNumber(message.UID)
-			if uid <= 0 || seen[uid] {
+	for _, item := range headers {
+		message, recipients, ok := parseICloudIMAPMessage(item)
+		if !ok {
+			continue
+		}
+		matchedMailboxIDs := matchingMailboxIDs(recipients, aliases)
+		if len(matchedMailboxIDs) == 0 {
+			continue
+		}
+		keep := false
+		for _, mailboxID := range matchedMailboxIDs {
+			if after := afterByMailbox[mailboxID]; !after.IsZero() && message.ReceivedAt.Before(after) {
 				continue
 			}
-			seen[uid] = true
-			uids = append(uids, uid)
+			keep = true
+			break
 		}
+		if !keep {
+			continue
+		}
+		uid := imapUIDNumber(item.UID)
+		if uid <= 0 || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		uids = append(uids, uid)
 	}
 	sortInts(uids)
 	return uids
@@ -1060,8 +1126,12 @@ type iCloudIMAPFetchedMessage struct {
 	Raw []byte
 }
 
-func iCloudIMAPMessagesByMailbox(fetched []iCloudIMAPFetchedMessage, mailboxes []Mailbox, after time.Time, keyword string, verificationOnly bool, ignoredEmails ...string) map[string][]ICloudSyncedMessage {
-	now := time.Now()
+// imapMailboxScope 把参与匹配的邮箱整理成「ID → 地址」与「ID → 时间下限」两张表。
+//
+// 时间下限分两种：增量同步用邮箱自己的上次同步时间往前推一个重叠窗口（避免边界漏信），
+// 全量回填则必须绕开它——那个下限会把每一封旧邮件都判成「比上次同步还早」而丢掉，
+// 而且失败是静默的：结果是「成功 0」。使用者报的正是这个。
+func imapMailboxScope(mailboxes []Mailbox, options MailSyncOptions, now time.Time, ignoredEmails ...string) (map[string]string, map[string]time.Time) {
 	aliases := make(map[string]string)
 	afterByMailbox := make(map[string]time.Time)
 	ignored := make(map[string]struct{}, len(ignoredEmails))
@@ -1069,6 +1139,16 @@ func iCloudIMAPMessagesByMailbox(fetched []iCloudIMAPFetchedMessage, mailboxes [
 		if email = normalizeICloudIMAPEmail(email); email != "" {
 			ignored[email] = struct{}{}
 		}
+	}
+	// 正在同步的邮箱自己不在忽略之列。
+	//
+	// 忽略名单的用途是「别把账号主号自己的邮件算到隐私别名头上」，传进来的是 Apple
+	// 主号地址，和别名不同，所以对那条路没有影响。但 IMAP 取码邮箱不一样：账号地址
+	// 就是邮箱地址本身，把它自己忽略掉会让 aliases 变成空表，matchingMailboxIDs 对
+	// 空表直接返回 nil，于是任何邮件都匹配不上——表现是每次同步都成功、入库 0 封、
+	// 游标还照常往前推进。
+	for _, mailbox := range mailboxes {
+		delete(ignored, normalizeICloudIMAPEmail(mailbox.Email))
 	}
 	for _, mailbox := range mailboxes {
 		id := strings.TrimSpace(mailbox.ID)
@@ -1080,15 +1160,24 @@ func iCloudIMAPMessagesByMailbox(fetched []iCloudIMAPFetchedMessage, mailboxes [
 			continue
 		}
 		aliases[id] = email
-		afterByMailbox[id] = mailboxSyncAfter(mailbox, after, now)
+		if options.FullScan {
+			afterByMailbox[id] = options.After
+			continue
+		}
+		afterByMailbox[id] = mailboxSyncAfter(mailbox, options.After, now)
 	}
+	return aliases, afterByMailbox
+}
+
+func iCloudIMAPMessagesByMailbox(fetched []iCloudIMAPFetchedMessage, mailboxes []Mailbox, options MailSyncOptions, keyword string, ignoredEmails ...string) map[string][]ICloudSyncedMessage {
+	aliases, afterByMailbox := imapMailboxScope(mailboxes, options, time.Now(), ignoredEmails...)
 	out := make(map[string][]ICloudSyncedMessage, len(aliases))
 	for _, item := range fetched {
 		message, recipients, ok := parseICloudIMAPMessage(item)
 		if !ok {
 			continue
 		}
-		if verificationOnly && !looksLikeVerificationText(message.Subject+"\n"+message.Body, keyword) {
+		if options.VerificationOnly() && !looksLikeVerificationText(message.Subject+"\n"+message.Body, keyword) {
 			continue
 		}
 		matchedMailboxIDs := matchingMailboxIDs(recipients, aliases)

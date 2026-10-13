@@ -190,6 +190,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/mailboxes/{id}", s.protected(s.handleMailbox))
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/status", s.protected(s.handleMailboxStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/sync", s.protected(s.handleMailboxSync))
+	// 回填历史：只作用于这一个邮箱，取回它已经在服务器上的邮件。
+	// 与 /sync 的区别是它不看游标、也不看「最近 24 小时」，所以能拿到旧邮件。
+	s.mux.HandleFunc("POST /api/mailboxes/{id}/backfill", s.protected(s.handleMailboxBackfill))
 	// 邮箱池可见性开关：QQ / 163 的地址默认只在母号页面，由使用者决定要不要进池。
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/pool", s.protected(s.handleMailboxPoolVisibility))
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/remote-clean", s.protected(s.handleMailboxRemoteClean))
@@ -821,6 +824,21 @@ func (s *Server) handleMailboxStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMailboxSync(w http.ResponseWriter, r *http.Request) {
 	result, err := s.mailbox.SyncMailboxMessages(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	data := struct {
+		mailboxservice.MailboxMessageSyncBatchResult
+		Synced int `json:"synced"`
+	}{MailboxMessageSyncBatchResult: result, Synced: result.SyncedMessages}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": data})
+}
+
+// handleMailboxBackfill 回填单个邮箱的历史邮件。
+// 与 /sync 走同一个服务层，区别只在选项：全量、不用游标，所以旧邮件才拿得到。
+func (s *Server) handleMailboxBackfill(w http.ResponseWriter, r *http.Request) {
+	result, err := s.mailbox.BackfillMailboxMessages(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeServiceError(w, err)
 		return

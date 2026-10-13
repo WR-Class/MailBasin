@@ -33,6 +33,9 @@ type MailSyncBatchResult struct {
 	Matched           int
 	HasMore           bool
 	InitializedCursor bool
+	// FailedBatches 记录全量回填里没取到的批次数。
+	// 大于 0 说明这次只扫了一部分，调用方据此不要推进游标。
+	FailedBatches int
 }
 
 func (options MailSyncOptions) VerificationOnly() bool {

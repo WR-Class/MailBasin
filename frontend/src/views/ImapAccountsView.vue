@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { AlertCircle, CheckCircle2, ChevronRight, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Search, Server, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, ChevronRight, CloudDownload, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Search, Server, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
@@ -350,6 +350,21 @@ async function togglePool(mailbox) {
   }
 }
 
+// 回填历史：只作用于这一个地址，取回它已经在服务器上的旧邮件。
+// 与「立即同步」的区别是它不看游标、也不看最近 24 小时——那两条正是旧邮件拿不到的原因。
+async function backfillAddress(mailbox) {
+  if (!startBusy(`backfill:${mailbox.id}`)) return
+  try {
+    const payload = await api(`/api/mailboxes/${mailbox.id}/backfill`, { method: 'POST' })
+    flash(`${mailbox.email} 回填完成：扫描 ${payload.scanned || 0} 封，新增 ${payload.synced || 0} 封`)
+    await load({ silent: true })
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy(`backfill:${mailbox.id}`)
+  }
+}
+
 async function deleteAccount(account) {
   const name = account.label || account.apple_id
   const ok = await confirmAction({
@@ -650,6 +665,11 @@ onBeforeUnmount(() => {
                             <li v-for="mailbox in selected.mailboxes" :key="mailbox.id">
                               <MailOpen :size="13" />
                               <span class="font-mono">{{ mailbox.email }}</span>
+                              <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`backfill:${mailbox.id}`)" title="把该地址服务器上已有的旧邮件取回来：不看游标，也不看最近 24 小时。邮件多时耗时较长。" @click="backfillAddress(mailbox)">
+                                <LoaderCircle v-if="isBusy(`backfill:${mailbox.id}`)" :size="12" class="animate-spin" />
+                                <CloudDownload v-else :size="12" />
+                                {{ isBusy(`backfill:${mailbox.id}`) ? '回填中' : '回填历史' }}
+                              </button>
                               <button type="button" class="secondary-button apple-check-button" :disabled="isBusy(`pool:${mailbox.id}`)" :title="mailbox.pool_hidden ? '放进邮箱池' : '移出邮箱池，只在本页可见'" @click="togglePool(mailbox)">
                                 <LoaderCircle v-if="isBusy(`pool:${mailbox.id}`)" :size="12" class="animate-spin" />
                                 <CheckCircle2 v-else-if="!mailbox.pool_hidden" :size="12" />

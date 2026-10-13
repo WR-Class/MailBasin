@@ -84,6 +84,7 @@ let syncExistingMessagesIntroVisible = false
 let cleanAllNoticeID = null
 let mailboxSyncBatch = null
 const mailboxMessageSyncHint = '同步该邮箱所属 Apple 主号的所有新邮件；IMAP 主路径，iCloud Web 补查并自动合并'
+const mailboxBackfillHint = '把该邮箱服务器上已经存在的旧邮件取回来：不看游标，也不看最近 24 小时。邮件多时耗时较长，但只作用于这一个邮箱。'
 const { success, error: showError, update: updateToast, dismiss: dismissToast } = useToast()
 const { confirm: confirmAction } = useConfirm()
 const mailboxStatusOptions = [
@@ -1239,6 +1240,25 @@ async function syncMailbox() {
   await runMailboxMessageSync(selected.value, { detail: true })
 }
 
+// 回填历史：只作用于这一个邮箱，取回它已经在服务器上的旧邮件。
+// 与「同步邮件」的区别是它不看游标、也不看最近 24 小时——那两条正是旧邮件拿不到的原因。
+// 邮件多时耗时较长，所以它只在这一个邮箱上跑，并如实把扫描量和新增量报出来。
+async function backfillMailbox() {
+  if (!selected.value) return
+  if (!startBusy('backfill')) return
+  const target = selected.value
+  try {
+    const data = await api(`/api/mailboxes/${target.id}/backfill`, { method: 'POST' })
+    flash(`回填完成：${mailboxMessageSyncSummary(data)}`)
+    await openMailbox(target)
+    await load()
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    finishBusy('backfill')
+  }
+}
+
 async function quickSyncMailbox(mailbox) {
   await runMailboxMessageSync(mailbox)
 }
@@ -1755,6 +1775,7 @@ onBeforeUnmount(() => {
           <div class="grid grid-cols-2 gap-2">
             <button class="detail-button detail-button-primary" :disabled="isBusy('sync') || isMailboxDeleteBusy(selected.id)" :title="mailboxMessageSyncHint" @click="syncMailbox"><RefreshCw :size="14" :class="isBusy('sync') ? 'animate-spin' : ''" />同步邮件</button>
             <button class="detail-button detail-button-secondary" :disabled="isBusy('code') || isMailboxDeleteBusy(selected.id)" @click="getCode"><LoaderCircle v-if="codeBusyVisible === 'code'" :size="14" class="animate-spin" /><KeyRound v-else :size="14" />获取验证码</button>
+            <button class="detail-button detail-button-secondary col-span-2" :disabled="isBusy('backfill') || isMailboxDeleteBusy(selected.id)" :title="mailboxBackfillHint" @click="backfillMailbox"><LoaderCircle v-if="isBusy('backfill')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('backfill') ? '正在回填历史邮件' : '回填历史邮件' }}</button>
           </div>
 
           <form class="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900" @submit.prevent="saveStatus">

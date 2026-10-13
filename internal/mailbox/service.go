@@ -923,6 +923,26 @@ func (s *Service) syncMailboxMessagesWithOptions(ctx context.Context, mailboxID 
 	return s.SyncMailboxBatchWithOptions(ctx, mailboxes, options)
 }
 
+// BackfillMailboxMessages 回填一个邮箱里已经存在的历史邮件。
+//
+// 与常规同步的区别全在选项上：FullScan 让协议层搜「全部」而不是只搜最近 24 小时，
+// 并让每个邮箱跳过「按上次同步时间算出的时间下限」；UseCursor=false 让它不从游标往后搜。
+// 少了其中任何一条，邮箱里已有的邮件都拿不到，而且失败是静默的——报告上写「成功 0」。
+//
+// 只作用在这一个邮箱，而不是一次扫全部几百个母号：后者墙钟和配额都会失控，中途失败也无从恢复。
+func (s *Service) BackfillMailboxMessages(ctx context.Context, mailboxID string) (MailboxMessageSyncBatchResult, error) {
+	mailbox, ok := s.store.FindMailboxByID(strings.TrimSpace(mailboxID))
+	if !ok {
+		return MailboxMessageSyncBatchResult{}, errors.New("邮箱不存在")
+	}
+	return s.syncMailboxMessagesWithOptions(ctx, mailbox.ID, MessageSyncOptions{
+		Mode:      protocol.MailSyncModeAllRecent,
+		Trigger:   "backfill",
+		FullScan:  true,
+		UseCursor: false,
+	})
+}
+
 // SyncExistingMailboxMessages 每个 Apple 主账号只拉取一次收件箱，再在本地把邮件分发到对应隐私邮箱。
 func (s *Service) SyncExistingMailboxMessages(ctx context.Context) (ExistingMailboxMessageSyncResult, error) {
 	return s.syncExistingMailboxMessages(ctx, nil, nil)
@@ -1299,7 +1319,10 @@ func (s *Service) syncGroup(ctx context.Context, key string, mailboxes []domain.
 // 一个母号的多个地址共用一个收件箱，逐地址同步会重复读同一批信；但路由是按收件人
 // 精确匹配的，必须每个地址都走一遍才能把它们各自归位——这与 SyncIMAPAccount 一致。
 // 单个地址失败不拖掉整批：批量同步里最需要知道的就是「哪一个失败了、为什么」。
-func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailbox, accountResult AccountMessageSyncResult) (AccountMessageSyncResult, error) {
+//
+// options 必须一路传到协议层：全量回填靠它绕开「只搜最近 24 小时」和「从游标往后搜」。
+// 这个参数以前不存在，于是上游传来的全量意图在这里被静默丢掉，回填按钮对 IMAP 邮箱无效。
+func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailbox, options MessageSyncOptions, accountResult AccountMessageSyncResult) (AccountMessageSyncResult, error) {
 	accountResult.Method = "imap"
 	stored := 0
 	var failures []string
@@ -1307,7 +1330,7 @@ func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailb
 		if err := ctx.Err(); err != nil {
 			return accountResult, err
 		}
-		count, err := s.SyncIMAPMailbox(ctx, mailbox.ID)
+		count, err := s.SyncIMAPMailboxWithOptions(ctx, mailbox.ID, options)
 		if err != nil {
 			code, message, _ := protocol.ErrorDetails(err)
 			failures = append(failures, mailbox.Email+"（"+firstNonEmpty(code, message)+"）")
@@ -1410,7 +1433,7 @@ func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, 
 	// 报「对应 Apple 账号登录态不存在」——而那个提示会让人以为要去重新登录 Apple，
 	// 这个邮箱却根本没有 Apple 账号，于是使用者只能干看着一个查不出原因的失败。
 	if provider == domain.ProviderIMAP {
-		return s.syncIMAPGroupNow(ctx, refreshed, accountResult)
+		return s.syncIMAPGroupNow(ctx, refreshed, options, accountResult)
 	}
 	// 外部取码邮箱没有母号，也没有登录态：凭据是每个邮箱自己的取码地址，
 	// 由 SyncExternalMailbox 按 ID 重读。少了这条分支它同样会掉到下面的
