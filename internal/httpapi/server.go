@@ -205,6 +205,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/settings", s.protected(s.handleSaveSettings))
 	s.mux.HandleFunc("POST /api/server-chan/test", s.protected(s.handleServerChanTest))
 	s.mux.HandleFunc("GET /api/update/status", s.protected(s.handleUpdateStatus))
+	s.mux.HandleFunc("POST /api/update/apply", s.protected(s.handleUpdateApply))
 	s.mux.HandleFunc("GET /api/create-settings", s.protected(s.handleCreateSettings))
 	s.mux.HandleFunc("PUT /api/create-settings", s.protected(s.handleSaveCreateSettings))
 	s.mux.HandleFunc("GET /api/events", s.protected(s.handleEvents))

@@ -48,6 +48,9 @@ async function loadUpdates(force = false) {
       updateState.status = status || null
       updateState.error = String(status?.error || '')
       updateState.loaded = true
+      updateRun.value = updateState.status?.run || null
+      // 页面打开时如果正好有一次更新在跑（比如刚点了更新又刷了页），接着看它的进度。
+      if (updateRun.value?.running && !runPoller) startRunPolling('')
       return updateState.status
     })
     .catch((error) => {
@@ -78,6 +81,63 @@ function markAllAnnouncementsRead() {
   saveReadAnnouncementIDs()
 }
 
+// 更新的进度。更新器跑在计划任务里、在服务之外，而且中途会把这个服务停掉再起回来，
+// 所以进度只能靠轮询后端（后端读盘上的状态文件）。这里的状态不是「本页面发出去的请求」。
+const updateRun = ref(null)
+const updateApplyBusy = ref(false)
+const applyError = ref('')
+let runPoller = null
+let runPollMisses = 0
+
+function stopRunPolling() {
+  if (runPoller) window.clearInterval(runPoller)
+  runPoller = null
+  updateApplyBusy.value = false
+}
+
+function startRunPolling(previousStartedAt) {
+  stopRunPolling()
+  runPollMisses = 0
+  updateApplyBusy.value = true
+
+  const tick = async () => {
+    let status
+    try {
+      status = await api('/api/update/status')
+    } catch {
+      // 更新器正要停掉这个服务、然后再起回来，所以这几秒轮询必然失败。这是预期内的，
+      // 不是错误，继续等；只有长时间联系不上才停下来，并如实说明等待是被打断的。
+      runPollMisses += 1
+      if (runPollMisses >= 20) {
+        applyError.value = '更新期间一直联系不上服务，已经停止等待。刷新页面可以看最后的状态。'
+        stopRunPolling()
+      }
+      return
+    }
+    runPollMisses = 0
+    updateState.status = status || null
+    updateRun.value = updateState.status?.run || null
+    const run = updateRun.value
+    // 还是上一次留下的那条记录：等这一次的 started_at 出现再判断结果，
+    // 否则会把上次的结局当成这次的。
+    if (!run || run.started_at === previousStartedAt) return false
+    if (run.running) return false
+    stopRunPolling()
+    loadUpdates(true).catch(() => {})
+  }
+
+  runPoller = window.setInterval(tick, 1500)
+  tick()
+}
+
+async function applyUpdate() {
+  if (updateApplyBusy.value) return
+  applyError.value = ''
+  const previousStartedAt = updateState.status?.run?.started_at || ''
+  await api('/api/update/apply', { method: 'POST' })
+  startRunPolling(previousStartedAt)
+}
+
 export function useUpdates() {
   return {
     updateState,
@@ -89,5 +149,9 @@ export function useUpdates() {
     loadUpdates,
     markAnnouncementRead,
     markAllAnnouncementsRead,
+    updateRun,
+    updateApplyBusy,
+    applyError,
+    applyUpdate,
   }
 }

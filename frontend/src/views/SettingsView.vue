@@ -33,7 +33,54 @@ const form = reactive({
   notify_account_login_state_offline: false,
 })
 const { success, error: showError } = useToast()
-const { updateState, showChecking, loadUpdates } = useUpdates()
+const { updateState, showChecking, loadUpdates, updateRun, updateApplyBusy, applyError, applyUpdate } = useUpdates()
+
+const updateApplyHint = computed(() => updateApplyBusy.value
+  ? '更新正在进行'
+  : '取源码、本机构建、替换程序、重启并验证；任一步失败自动回滚。更新期间服务会停 5–9 秒。')
+
+// 把更新器的状态翻译成一句人话。后端给的是 state/step，这里只负责说得准确：
+// 「拒绝」和「已回滚」都还是可用状态，「回滚未能确认」才是真正要让人紧张的。
+const updateRunView = computed(() => {
+  if (applyError.value) return { tone: 'bad', title: '没能启动更新', message: applyError.value, detail: '' }
+  const run = updateRun.value
+  if (!run) return null
+  const detail = runDetail(run)
+  if (run.running) return { tone: 'running', title: `正在更新：${run.step || '准备'}`, message: run.message || '—', detail }
+  switch (run.state) {
+    case 'done':
+      return { tone: 'ok', title: '更新完成', message: run.message || '—', detail }
+    case 'refused':
+      return { tone: 'warn', title: '没有更新：前置条件不满足', message: run.message || '—', detail }
+    case 'rolled-back':
+      return { tone: 'warn', title: '更新失败，已回滚到原版本', message: run.message || '—', detail }
+    case 'failed':
+      return { tone: 'bad', title: '更新失败，且未能确认回滚', message: run.message || '—', detail }
+    default:
+      return { tone: 'warn', title: `更新状态：${run.state || '未知'}`, message: run.message || '—', detail }
+  }
+})
+
+const runToneClass = {
+  running: 'border-slate-200 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-200',
+  ok: 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200',
+  warn: 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200',
+  bad: 'border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200',
+}
+const updateRunCardClass = computed(() => (updateRunView.value ? runToneClass[updateRunView.value.tone] : ''))
+
+function runDetail(run) {
+  const parts = []
+  if (run.from_commit || run.to_commit) parts.push(`${shortCommit(run.from_commit) || '?'} → ${shortCommit(run.to_commit) || '?'}`)
+  if (run.finished_at) parts.push(`结束于 ${formatDate(run.finished_at)}`)
+  // 状态文件说在跑、但那个进程已经不存在：多半是机器重启或更新器被杀掉，要说明白。
+  if (run.stale) parts.push('这次更新没有正常结束（进程已不在）')
+  return parts.join(' · ')
+}
+
+function applyUpdateNow() {
+  applyUpdate().catch((error) => { applyError.value = error.message })
+}
 // 应用凭据（Microsoft / Google 的客户端 ID、密钥、租户、代理）不在这里改：
 // 它们已经搬到各自账号页的就地编辑里，本页只留一段指路文字。
 const publicAPIKeyReady = computed(() => Boolean(String(form.public_api_key || '').trim() || runtime.value.config_api_key_configured))
@@ -370,7 +417,7 @@ onBeforeUnmount(() => {
             <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"><RefreshCw :size="20" /></span>
             <div class="min-w-0">
               <h2 class="text-base font-black text-slate-900 dark:text-slate-100">版本与更新</h2>
-              <p class="mt-1 text-xs leading-5 text-slate-400">根据仓库公告配置检查版本，无需 API Token；当前只提供查看。</p>
+              <p class="mt-1 text-xs leading-5 text-slate-400">根据仓库公告配置检查版本，无需 API Token；也可以直接更新本机：取源码、本机构建、替换、重启，任一步失败自动回滚。</p>
             </div>
           </div>
           <div class="flex shrink-0 flex-wrap gap-2">
@@ -380,6 +427,25 @@ onBeforeUnmount(() => {
               <RefreshCw v-else :size="17" />
               {{ showChecking ? '正在检查' : updateState.status?.enabled === false ? '检查更新已关闭' : '检查更新' }}
             </button>
+            <button type="button" class="primary-button" :disabled="updateApplyBusy || updateState.status?.enabled === false" :data-tooltip="updateApplyHint" @click="applyUpdateNow">
+              <LoaderCircle v-if="updateApplyBusy" :size="17" class="animate-spin" />
+              <RefreshCw v-else :size="17" />
+              {{ updateApplyBusy ? '正在更新' : '立即更新' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 更新进度。信息来自后端读的盘上状态文件，不是本页面的请求状态：更新器在服务之外跑，
+             而且中途会把这个服务停掉再起回来，这一段页面是联系不上后端的。 -->
+        <div v-if="updateRunView" class="border-b border-slate-100 px-5 py-4 dark:border-slate-700 sm:px-6">
+          <div class="rounded-xl border p-4" :class="updateRunCardClass">
+            <div class="flex items-center gap-2">
+              <LoaderCircle v-if="updateRun?.running" :size="15" class="animate-spin" />
+              <CircleAlert v-else :size="15" />
+              <strong class="text-sm">{{ updateRunView.title }}</strong>
+            </div>
+            <p class="mt-1.5 break-words text-xs leading-5">{{ updateRunView.message }}</p>
+            <p v-if="updateRunView.detail" class="mt-1 break-words text-[11px] leading-5 opacity-75">{{ updateRunView.detail }}</p>
           </div>
         </div>
 

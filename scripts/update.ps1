@@ -116,7 +116,9 @@ function Write-Status {
     finished_at = $script:FinishedAt
     error       = $script:FailureReason
     rolled_back = $script:RolledBack
-    exe_backup  = (Join-Path $BackupDir ("ipm-server-{0}.exe" -f $script:FromCommit))
+    # 只有真的存在那个备份文件才报路径。否则拒绝更新时会出现 ipm-server-.exe
+    # 这种名字（提交号是空的），看着像有个备份可用，其实什么都没做。
+    exe_backup  = $(if ($script:BackupExe -and (Test-Path $script:BackupExe)) { $script:BackupExe } else { '' })
     log_path    = $UpdateLog
   }
   $json = $body | ConvertTo-Json -Depth 4
