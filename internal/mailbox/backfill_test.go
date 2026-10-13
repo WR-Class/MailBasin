@@ -354,6 +354,144 @@ func TestBulkExistingMailboxSyncSharesTheRetentionFloor(t *testing.T) {
 	}
 }
 
+// 被打断的一轮必须能接着做，而不是从零重扫。
+//
+// 原来的收尾是「服务重启，未完成的邮件同步任务已停止，请重新执行」——重新执行就是从零重来。
+// 一轮批量全量在几百个邮箱上要跑很久，白重扫的代价是真实存在的。
+func TestInterruptedBulkSyncResumesFromCompletedAccounts(t *testing.T) {
+	state := openSyncTestStore(t)
+	finished := saveSyncTestAccount(t, state, "resume-finished@icloud.com", true)
+	saveSyncTestAccount(t, state, "resume-pending@icloud.com", true)
+	backend := &fakeMessageSyncBackend{
+		imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+		webResult:  protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+	}
+	service := NewService(config.Default(), state)
+	service.messageBackend = backend
+
+	// 造出「上一轮做完一个账号就被打断」的状态：重启后从库里读回来的就是这个形状。
+	service.messageSyncJob = ExistingMailboxMessageSyncJob{
+		Status:              "interrupted",
+		CompletedAccountIDs: []string{finished.AccountID},
+		Failures:            []ExistingMailboxMessageSyncFailure{},
+	}
+
+	job, err := service.StartExistingMailboxMessageSync(context.Background())
+	if err != nil {
+		t.Fatalf("启动续传失败：%v", err)
+	}
+	if job.ResumedAccounts != 1 || job.TotalAccounts != 1 {
+		t.Fatalf("这一轮应当只做没做完的那 1 个账号：Resumed=%d Total=%d", job.ResumedAccounts, job.TotalAccounts)
+	}
+	if len(job.CompletedAccountIDs) != 1 || job.CompletedAccountIDs[0] != finished.AccountID {
+		t.Fatalf("已完成集合要接着带下去，否则再被打断一次就丢断点了：%+v", job.CompletedAccountIDs)
+	}
+
+	status := waitExistingMailboxMessageSyncJob(t, service)
+	if status.SuccessfulAccounts != 1 || status.FailedAccounts != 0 {
+		t.Fatalf("续传这一轮的结果不对：%+v", status)
+	}
+	if imap, web, _ := backend.counts(); imap != 1 || web != 1 {
+		t.Fatalf("已经做完的账号不该再被访问一次：IMAP=%d，Web=%d", imap, web)
+	}
+}
+
+// 反面：整轮跑完之后再点一次，必须是全新的一轮。
+//
+// 少了这条，续传就会变成「跑过一次以后再也做不了全量」——完成集合永远非空，
+// 每次都被当成续传。
+func TestCompletedBulkSyncStartsAFullPassAgain(t *testing.T) {
+	state := openSyncTestStore(t)
+	finished := saveSyncTestAccount(t, state, "full-again-a@icloud.com", true)
+	saveSyncTestAccount(t, state, "full-again-b@icloud.com", true)
+	backend := &fakeMessageSyncBackend{
+		imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+		webResult:  protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+	}
+	service := NewService(config.Default(), state)
+	service.messageBackend = backend
+
+	// 上一轮是完整跑完的：完成集合里还留着 id，但它已经不该被认。
+	service.messageSyncJob = ExistingMailboxMessageSyncJob{
+		Status:              "completed",
+		CompletedAccountIDs: []string{finished.AccountID},
+		Failures:            []ExistingMailboxMessageSyncFailure{},
+	}
+
+	job, err := service.StartExistingMailboxMessageSync(context.Background())
+	if err != nil {
+		t.Fatalf("启动失败：%v", err)
+	}
+	if job.ResumedAccounts != 0 || job.TotalAccounts != 2 {
+		t.Fatalf("整轮跑完之后应当是全新的一轮，两个账号都要做：Resumed=%d Total=%d", job.ResumedAccounts, job.TotalAccounts)
+	}
+	_ = waitExistingMailboxMessageSyncJob(t, service)
+	if imap, _, _ := backend.counts(); imap != 2 {
+		t.Fatalf("两个账号都该被访问：IMAP=%d", imap)
+	}
+}
+
+// 成功做完的账号要被记下来，而且要真的落库。
+//
+// 上面那条续传测试是手工把完成集合塞进去的，只覆盖了「读到集合之后怎么用」，
+// 没覆盖「这个集合是怎么写出来的」。少了这一条，把记录那一步删掉也照样全绿。
+func TestCompletedBulkSyncRecordsWhichAccountsItFinished(t *testing.T) {
+	state := openSyncTestStore(t)
+	first := saveSyncTestAccount(t, state, "record-a@icloud.com", true)
+	second := saveSyncTestAccount(t, state, "record-b@icloud.com", true)
+	backend := &fakeMessageSyncBackend{
+		imapResult: protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+		webResult:  protocol.MailSyncBatchResult{MessagesByMailbox: map[string][]protocol.ICloudSyncedMessage{}},
+	}
+	service := NewService(config.Default(), state)
+	service.messageBackend = backend
+
+	if _, err := service.StartExistingMailboxMessageSync(context.Background()); err != nil {
+		t.Fatalf("启动失败：%v", err)
+	}
+	status := waitExistingMailboxMessageSyncJob(t, service)
+	if status.Status != "completed" {
+		t.Fatalf("两个账号都该成功，任务应以 completed 收尾：%+v", status)
+	}
+	recorded := make(map[string]bool, len(status.CompletedAccountIDs))
+	for _, id := range status.CompletedAccountIDs {
+		recorded[id] = true
+	}
+	if !recorded[first.AccountID] || !recorded[second.AccountID] {
+		t.Fatalf("做完的账号都要记进完成集合：期望 %s 和 %s，实际 %+v",
+			first.AccountID, second.AccountID, status.CompletedAccountIDs)
+	}
+
+	// 落库才是关键：续传靠的是重启之后还能把它读回来。
+	var persisted ExistingMailboxMessageSyncJob
+	found, err := state.LoadRuntimeState(existingMailboxMessageSyncStateID, &persisted)
+	if err != nil || !found {
+		t.Fatalf("任务状态应当已落库：found=%v err=%v", found, err)
+	}
+	persistedIDs := make(map[string]bool, len(persisted.CompletedAccountIDs))
+	for _, id := range persisted.CompletedAccountIDs {
+		persistedIDs[id] = true
+	}
+	if !persistedIDs[first.AccountID] || !persistedIDs[second.AccountID] {
+		t.Fatalf("落库的那份也要带完成集合，否则重启后断点就丢了：%+v", persisted.CompletedAccountIDs)
+	}
+}
+
+func waitExistingMailboxMessageSyncJob(t *testing.T, service *Service) ExistingMailboxMessageSyncJob {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status := service.ExistingMailboxMessageSyncStatus()
+		if !status.Running {
+			return status
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("批量同步没在预期时间内结束：%+v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func createIMAPBackfillTestMailbox(t *testing.T, service *Service) domain.Mailbox {
 	t.Helper()
 	account, _, err := service.CreateIMAPAccount(

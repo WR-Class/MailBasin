@@ -84,6 +84,22 @@ let syncExistingMessagesIntroVisible = false
 let cleanAllNoticeID = null
 let mailboxSyncBatch = null
 const mailboxMessageSyncHint = '同步该邮箱所属 Apple 主号的所有新邮件；IMAP 主路径，iCloud Web 补查并自动合并'
+
+// 上一次批量同步被打断时，做完的账号已经记进任务状态并落库，再点一次会从这里接着做，
+// 不会从零重扫。所以这一次要做的会比账号总数少——按钮上必须说明，否则那看起来像漏算了。
+const mailboxMessageSyncResumable = computed(() => {
+  const job = existingMailboxMessageSync.value
+  if (!job || job.running) return 0
+  if (job.status !== 'interrupted' && job.status !== 'partial') return 0
+  return Array.isArray(job.completed_account_ids) ? job.completed_account_ids.length : 0
+})
+
+const mailboxMessageSyncBulkHint = computed(() => {
+  const base = '读取所有 Apple 主号在保留期以内的邮件；IMAP 主路径，iCloud Web 补查并自动合并。更早的邮件取回来也会被自动清理删掉'
+  const resumed = mailboxMessageSyncResumable.value
+  if (!resumed) return base
+  return `${base}。上次同步中断过，已有 ${resumed} 个账号做完，再点会从这些账号之后接着做，不会重头再来`
+})
 const mailboxBackfillHint = '把该邮箱服务器上已经存在的旧邮件取回来：不看游标，也不看最近 24 小时。只取保留期以内的邮件——更早的取回来也会被自动维护删掉。邮件多时耗时较长，但只作用于这一个邮箱。'
 const { success, error: showError, update: updateToast, dismiss: dismissToast } = useToast()
 const { confirm: confirmAction } = useConfirm()
@@ -1647,7 +1663,7 @@ onBeforeUnmount(() => {
         </div>
         <div class="mailbox-command-actions">
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing') || isBusy('sync-existing-messages') || existingMailboxMessageSync.running" @click="openSyncDialog"><LoaderCircle v-if="isBusy('sync-existing')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('sync-existing') ? '正在同步邮箱' : '同步已有邮箱' }}</button>
-          <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing-messages') || isBusy('sync-existing') || existingMailboxMessageSync.running" title="读取所有 Apple 主号在保留期以内的邮件；IMAP 主路径，iCloud Web 补查并自动合并。更早的邮件取回来也会被自动清理删掉" @click="syncExistingMailboxMessages"><LoaderCircle v-if="isBusy('sync-existing-messages') || existingMailboxMessageSync.running" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />{{ existingMailboxMessageSync.running ? `正在同步 ${existingMailboxMessageSync.completed_accounts || 0}/${existingMailboxMessageSync.total_accounts || 0}` : isBusy('sync-existing-messages') ? '正在启动同步' : '同步已有邮箱邮件' }}</button>
+          <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing-messages') || isBusy('sync-existing') || existingMailboxMessageSync.running" :title="mailboxMessageSyncBulkHint" @click="syncExistingMailboxMessages"><LoaderCircle v-if="isBusy('sync-existing-messages') || existingMailboxMessageSync.running" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />{{ existingMailboxMessageSync.running ? `正在同步 ${existingMailboxMessageSync.completed_accounts || 0}/${existingMailboxMessageSync.total_accounts || 0}` : isBusy('sync-existing-messages') ? '正在启动同步' : '同步已有邮箱邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('import')" @click="openImportDialog"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><MailPlus v-else :size="14" />{{ isBusy('import') ? '正在导入邮箱' : '导入本地邮箱' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('external-import')" title="导入没有母号、没有密码，只有取件接口的邮箱" @click="openExternalImportDialog"><LoaderCircle v-if="isBusy('external-import')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />导入外部取码邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" title="扫描并彻底删除全部 Apple 账号的云端和本地邮件" @click="cleanAllAppleMail"><LoaderCircle v-if="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />{{ isBusy('clean-summary') ? '正在统计邮件' : isBusy('clean-start') ? '正在启动清理' : appleMailCleanup.running ? `正在清理 ${appleMailCleanup.completed || 0}/${appleMailCleanup.total_accounts || 0}` : '全部彻底清理 Apple 邮件' }}</button>

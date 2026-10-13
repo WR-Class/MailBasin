@@ -160,30 +160,37 @@ type ExistingMailboxMessageSyncResult struct {
 }
 
 type ExistingMailboxMessageSyncJob struct {
-	ID                 string                              `json:"id,omitempty"`
-	Running            bool                                `json:"running"`
-	Status             string                              `json:"status"`
-	Stage              string                              `json:"stage,omitempty"`
-	TotalAccounts      int                                 `json:"total_accounts"`
-	TotalMailboxes     int                                 `json:"total_mailboxes"`
-	SkippedMailboxes   int                                 `json:"skipped_mailboxes"`
-	Queued             int                                 `json:"queued"`
-	Active             int                                 `json:"active"`
-	CompletedAccounts  int                                 `json:"completed_accounts"`
-	SuccessfulAccounts int                                 `json:"successful_accounts"`
-	FailedAccounts     int                                 `json:"failed_accounts"`
-	SyncedMessages     int                                 `json:"synced_messages"`
-	Scanned            int                                 `json:"scanned"`
-	Matched            int                                 `json:"matched"`
-	IMAPAccounts       int                                 `json:"imap_accounts"`
-	WebAPIAccounts     int                                 `json:"web_api_accounts"`
-	Fallbacks          int                                 `json:"fallbacks"`
-	HasMore            bool                                `json:"has_more"`
-	LastError          string                              `json:"last_error,omitempty"`
-	Failures           []ExistingMailboxMessageSyncFailure `json:"failures,omitempty"`
-	StartedAt          time.Time                           `json:"started_at,omitempty"`
-	UpdatedAt          time.Time                           `json:"updated_at,omitempty"`
-	CompletedAt        time.Time                           `json:"completed_at,omitempty"`
+	ID                 string `json:"id,omitempty"`
+	Running            bool   `json:"running"`
+	Status             string `json:"status"`
+	Stage              string `json:"stage,omitempty"`
+	TotalAccounts      int    `json:"total_accounts"`
+	TotalMailboxes     int    `json:"total_mailboxes"`
+	SkippedMailboxes   int    `json:"skipped_mailboxes"`
+	Queued             int    `json:"queued"`
+	Active             int    `json:"active"`
+	CompletedAccounts  int    `json:"completed_accounts"`
+	SuccessfulAccounts int    `json:"successful_accounts"`
+	FailedAccounts     int    `json:"failed_accounts"`
+	// CompletedAccountIDs 记下这一轮里已经做成功的账号，好让被打断的一轮能从断点接着做。
+	// 它跟着整个 job 一起落库（publishExistingMailboxMessageSyncLocked 每收尾一个账号就存一次），
+	// 所以进程被杀掉也能续；只在整轮 completed 之后失效——那时留着的集合不再被认。
+	CompletedAccountIDs []string `json:"completed_account_ids,omitempty"`
+	// ResumedAccounts 是这一轮开始时因为上一轮已完成而跳过的账号数，用来对使用者解释
+	// 「为什么这次要做的比总数少」。
+	ResumedAccounts int                                 `json:"resumed_accounts,omitempty"`
+	SyncedMessages  int                                 `json:"synced_messages"`
+	Scanned         int                                 `json:"scanned"`
+	Matched         int                                 `json:"matched"`
+	IMAPAccounts    int                                 `json:"imap_accounts"`
+	WebAPIAccounts  int                                 `json:"web_api_accounts"`
+	Fallbacks       int                                 `json:"fallbacks"`
+	HasMore         bool                                `json:"has_more"`
+	LastError       string                              `json:"last_error,omitempty"`
+	Failures        []ExistingMailboxMessageSyncFailure `json:"failures,omitempty"`
+	StartedAt       time.Time                           `json:"started_at,omitempty"`
+	UpdatedAt       time.Time                           `json:"updated_at,omitempty"`
+	CompletedAt     time.Time                           `json:"completed_at,omitempty"`
 }
 
 type existingMailboxMessageSyncTarget struct {
@@ -995,24 +1002,67 @@ func (s *Service) StartExistingMailboxMessageSync(parent context.Context) (Exist
 	}
 	s.messageSyncJobGeneration++
 	generation := s.messageSyncJobGeneration
+	// 上一轮是被打断（中断或部分失败）的话，它做完的账号直接接着用：那些账号的历史邮件
+	// 已经取过一遍，再全量扫一遍只是白花一次墙钟和接口配额。整轮 completed 之后这个集合
+	// 不再被认，所以「续传」只针对被打断的那一轮，跑完一轮之后下一次仍是全新的一轮。
+	carried, carriedIDs := s.resumableExistingMailboxMessageSyncAccountsLocked()
+	remaining := targets
+	if len(carried) > 0 {
+		remaining = make([]existingMailboxMessageSyncTarget, 0, len(targets))
+		for _, target := range targets {
+			if _, done := carried[target.accountID]; done {
+				continue
+			}
+			remaining = append(remaining, target)
+		}
+	}
 	now := time.Now()
 	s.messageSyncJob = ExistingMailboxMessageSyncJob{
-		ID:               fmt.Sprintf("mailbox_message_sync_%d", now.UnixNano()),
-		Running:          true,
-		Status:           "queued",
-		Stage:            "queued",
-		TotalAccounts:    len(targets),
-		TotalMailboxes:   totalMailboxes,
-		SkippedMailboxes: skippedMailboxes,
-		Queued:           len(targets),
-		Failures:         []ExistingMailboxMessageSyncFailure{},
-		StartedAt:        now,
-		UpdatedAt:        now,
+		ID:                  fmt.Sprintf("mailbox_message_sync_%d", now.UnixNano()),
+		Running:             true,
+		Status:              "queued",
+		Stage:               "queued",
+		TotalAccounts:       len(remaining),
+		TotalMailboxes:      totalMailboxes,
+		SkippedMailboxes:    skippedMailboxes,
+		Queued:              len(remaining),
+		ResumedAccounts:     len(targets) - len(remaining),
+		CompletedAccountIDs: carriedIDs,
+		Failures:            []ExistingMailboxMessageSyncFailure{},
+		StartedAt:           now,
+		UpdatedAt:           now,
 	}
 	s.publishExistingMailboxMessageSyncLocked()
 	out := s.existingMailboxMessageSyncSnapshotLocked()
-	go s.runExistingMailboxMessageSync(parent, generation, targets, totalMailboxes, skippedMailboxes)
+	go s.runExistingMailboxMessageSync(parent, generation, remaining, totalMailboxes, skippedMailboxes)
 	return out, nil
+}
+
+// resumableExistingMailboxMessageSyncAccountsLocked 返回上一轮被打断时已经做完的账号。
+//
+// 只认「被中断」和「部分失败」两种收尾：整轮 completed 之后返回空，下一次就是全新的一轮，
+// 否则跑完一次之后就再也做不了全量了。失败的账号从来不在完成集里，所以续传会把它们重做。
+//
+// 调用方必须已持有 messageSyncJobMu。
+func (s *Service) resumableExistingMailboxMessageSyncAccountsLocked() (map[string]struct{}, []string) {
+	job := s.messageSyncJob
+	if job.Status != "interrupted" && job.Status != "partial" {
+		return nil, nil
+	}
+	done := make(map[string]struct{}, len(job.CompletedAccountIDs))
+	ids := make([]string, 0, len(job.CompletedAccountIDs))
+	for _, id := range job.CompletedAccountIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, seen := done[id]; seen {
+			continue
+		}
+		done[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return done, ids
 }
 
 // ExistingMailboxMessageSyncStatus 返回后台邮件同步任务的当前快照。
@@ -1176,6 +1226,11 @@ func (s *Service) finishExistingMailboxMessageSyncAccount(generation uint64, acc
 	s.addExistingMailboxMessageSyncMethodLocked(account.Method)
 	if account.Error == "" {
 		s.messageSyncJob.SuccessfulAccounts++
+		// 记下来是为了被打断时能续：只有成功的账号才算做完，失败的账号会留在待办里
+		// 等下一轮重做。
+		if id := strings.TrimSpace(account.AccountID); id != "" {
+			s.messageSyncJob.CompletedAccountIDs = append(s.messageSyncJob.CompletedAccountIDs, id)
+		}
 		s.messageSyncJob.Stage = "account-completed"
 	} else {
 		s.messageSyncJob.FailedAccounts++
@@ -1241,6 +1296,7 @@ func (s *Service) publishExistingMailboxMessageSyncLocked() {
 func (s *Service) existingMailboxMessageSyncSnapshotLocked() ExistingMailboxMessageSyncJob {
 	out := s.messageSyncJob
 	out.Failures = append([]ExistingMailboxMessageSyncFailure(nil), s.messageSyncJob.Failures...)
+	out.CompletedAccountIDs = append([]string(nil), s.messageSyncJob.CompletedAccountIDs...)
 	return out
 }
 
