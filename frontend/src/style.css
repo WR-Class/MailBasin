@@ -347,6 +347,40 @@ textarea.field {
   text-align: right;
 }
 
+/* 「操作」列钉在右边。
+ *
+ * 这张表九列合计 1338px，被 min-width:1340px 顶住，而它所在的视口在 1280 宽的窗口里
+ * 只剩 966px——最右边的「操作」列整列落在可视区之外，同步/取码/详情/删除一个都点不到，
+ * 要先横滑几百像素。那是整张表最常用的一列，却放在最难够到的位置。
+ *
+ * 钉住之后其它列照旧横滑，这一列始终在手边，任何窗口宽度下都不用先滚动。
+ * 不能改 min-width 来解决：窗口可以比 1280 更窄，靠调宽度只是把同一个问题往后推。
+ */
+.mailbox-pool-table th:last-child,
+.mailbox-pool-table tbody tr:not(.mailbox-empty-row) td:last-child {
+  position: sticky;
+  right: 0;
+  /* 没有不透明底色的话，横滑时其它列会从这一格底下透出来。行悬停/选中的底色
+   * 由下面两条更具体的选择器补上，否则钉住这一格会失去悬停反馈。 */
+  background: var(--app-surface);
+  /* 用 inset 阴影而不是 border-left：列宽本来是算好的，加边框会再挤掉几个像素。 */
+  box-shadow: inset 1px 0 0 var(--app-line);
+}
+
+.mailbox-pool-table th:last-child {
+  /* 表头那行自己是 sticky top:0 z-index:3，钉在右上角这一格要在它之上。 */
+  z-index: 4;
+  background: var(--app-surface-soft);
+}
+
+.mailbox-pool-table tbody tr:hover td:last-child {
+  background: color-mix(in srgb, var(--app-primary) 3%, var(--app-surface));
+}
+
+.mailbox-pool-table tbody tr.mailbox-row-selected td:last-child {
+  background: color-mix(in srgb, var(--app-primary) 7%, var(--app-surface));
+}
+
 .mailbox-pool-table tbody tr:hover td {
   background: color-mix(in srgb, var(--app-primary) 3%, var(--app-surface));
 }
