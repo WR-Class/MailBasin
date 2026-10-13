@@ -52,6 +52,8 @@ const updateRunView = computed(() => {
       return { tone: 'ok', title: '更新完成', message: run.message || '—', detail }
     case 'refused':
       return { tone: 'warn', title: '没有更新：前置条件不满足', message: run.message || '—', detail }
+    case 'not-installed':
+      return { tone: 'warn', title: '构建失败，没有安装（服务没停过）', message: run.message || '—', detail }
     case 'rolled-back':
       return { tone: 'warn', title: '更新失败，已回滚到原版本', message: run.message || '—', detail }
     case 'failed':

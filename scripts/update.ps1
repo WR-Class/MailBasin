@@ -203,10 +203,11 @@ function Get-TrackedChanges {
 
 function Invoke-Rollback {
   param([string]$Reason)
-  # 返回三种结局，让收尾能如实说话：
+  # 返回四种结局，让收尾能如实说话：
   #   noop        前置条件就没过，什么都没动过——这不是回滚，是拒绝
-  #   restored    真的动过，并且已经确认旧版本在运行
-  #   unconfirmed 动了但没能确认恢复——必须大声报告
+  #   untouched   做了些事（比如源码指针动过）但从未碰过正在跑的程序——没有东西被装上去
+  #   restored    真的换过，并且已经确认旧版本在运行
+  #   unconfirmed 换了但没能确认恢复——必须大声报告
   if (-not $script:Swapped -and -not $script:TreeMoved) {
     Write-Log ("不需要回滚：还没动过源码或可执行文件（{0}）" -f $Reason)
     return 'noop'
@@ -244,6 +245,20 @@ function Invoke-Rollback {
     [void](Invoke-ServerCmd 'start')
   }
   $live = Wait-HealthCommit -Seconds $VerifySeconds
+
+  if (-not $serviceTouched) {
+    # 从头到尾没碰过服务，它跑的还是原来那个程序。唯一可能的例外是它本来就和
+    # 源码指针不一致（更新之前就是脱节的），那不是这次更新造成的，
+    # 所以不该说成「回滚未确认」——那会把一个并未发生的危险说成发生了。
+    if (-not $live) {
+      Write-Log '没有动过服务，但它没有应答——需要人工看一眼'
+      return 'unconfirmed'
+    }
+    Write-Log ("没有装上任何东西，服务全程没停过，仍在运行：{0}" -f $live)
+    $script:RolledBack = $true
+    return 'untouched'
+  }
+
   if ($live -eq $script:FromCommit) {
     Write-Log ("回滚完成，旧版本已在运行：{0}" -f $live)
     $script:RolledBack = $true
@@ -402,6 +417,11 @@ try {
     'noop' {
       # 前置条件没过，一个字节都没动过。说「已回滚」是不诚实的。
       Write-Status -Step 'failed' -State 'refused' -Message ("已拒绝，没有做任何改动：{0}" -f $script:FailureReason)
+    }
+    'untouched' {
+      # 从未装上去任何东西，服务也没停过。说「已回滚」也是不准确的：
+      # 没有东西需要回滚，原来的程序一直在跑。
+      Write-Status -Step 'failed' -State 'not-installed' -Message ("没有装上任何东西，服务全程没停过：{0}" -f $script:FailureReason)
     }
     'restored' {
       Write-Status -Step 'failed' -State 'rolled-back' -Message ("更新失败，已回滚到原版本：{0}" -f $script:FailureReason)
