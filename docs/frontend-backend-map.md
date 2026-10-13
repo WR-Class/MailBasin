@@ -50,7 +50,9 @@ http://127.0.0.1:8788
 
 > **这一条我本轮没有实际跑过**，第一次用请自己确认一次（开 dev server，看 `/api/auth/status` 能不能读到已登录状态）。
 
-> **包管理器**：`frontend/` 下同时有 `package-lock.json` 和 `pnpm-lock.yaml`（后者在 `.gitignore` 里）。动手前先确认哪个锁文件被仓库跟踪：`git ls-files frontend`。别两个都用。
+> **包管理器 — 已查实，按这个来，别自己判断。** 仓库跟踪的是 **npm 的 `package-lock.json`**，它是这份仓库钉依赖版本的唯一凭据。同目录下的 `pnpm-lock.yaml` 是构建时额外生成的副产品，已加进 `.gitignore`，不在仓库里，**忽略它**。
+>
+> **装依赖、加依赖一律用 npm。** 用别的工具加依赖，新依赖不会被记进仓库跟踪的那份锁文件——别人 clone 下来就装不出你这套版本，两边依赖树分叉，「在我这儿好的、在你那儿坏了」就是这么来的。这是接手界面时最容易出问题的一个动作。
 
 ---
 
@@ -297,7 +299,7 @@ app-shell
 
 - **一键更新的确认条只写到 `origin/main`，写不出真实的「从 X 到 Y」。** 因为 `/api/update/status` 只给 `current.commit`（正在运行的），`run.from_commit`/`to_commit` 是**上一次**运行的结果，不是预报。要显示真实目标，得让更新器 fetch 后把目标写进状态、或加一个预览接口——**属于后端改动**。
 - **从老版本升上来、且 `data_path` 非默认值的人，第一次更新的进度卡片会是空的。** 那次跑的是**旧** `update.ps1`（PowerShell 启动时就把脚本读进内存了），旧版把状态写死在 `<repo>\data\run`，而新版服务从 `filepath.Dir(data_path)\run` 读。更新本身正常完成，只是那一次看不到进度；下一次恢复正常。默认 `data/app.db` 不受影响。
-- **锁文件现状**：`frontend/package-lock.json` 与 `frontend/pnpm-lock.yaml` 并存（后者被忽略）。长期维护前端的人应该二选一并统一。
+- **锁文件**：仓库用 npm 的 `package-lock.json` 钉版本（已跟踪，是唯一凭据）。`pnpm-lock.yaml` 是构建副产品，已忽略。**统一用 npm**——混用会让新依赖进不了被跟踪的那份锁文件。重做界面本身不受影响，受影响的只有「装依赖」这一个动作。
 
 ---
 
