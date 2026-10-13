@@ -58,6 +58,13 @@ type Server struct {
 	keepAliveTargets    map[string]appleKeepAliveTarget
 	keepAliveIntervalFn func(time.Duration, int) time.Duration
 
+	// 更新守卫的两个接缝，供测试注入。
+	// 生产里 updateJobs 就是 s.mailbox；updateTrigger 为 nil 时走 triggerUpdateTask。
+	// 它们存在只为一件事：让「任务在跑就拒绝」这条路径能在不启动真任务、不真的启动一次
+	// 更新的前提下被测到。
+	updateJobs    updateJobStatus
+	updateTrigger func() error
+
 	// Microsoft 设备码登录是"用户去浏览器操作 + 前端轮询"的两段式流程，
 	// 未完成的会话只保存在内存里，重启即失效，不落库。
 	microsoftLoginMu sync.Mutex
@@ -89,6 +96,9 @@ func New(cfg config.Config, state *store.Store, logger *slog.Logger) *Server {
 		googleFlows:      make(map[string]domain.GoogleAuthFlow),
 	}
 	state.SetChangeLogLimit(cfg.DatabaseChangeLogLimit)
+	// 守卫默认读真实的 mailbox 服务。测试会把这个字段换成假的，好让「任务在跑」这种
+	// 状态不必真的启动一次邮件任务就能造出来。
+	s.updateJobs = s.mailbox
 	// 更新检查要访问 raw.githubusercontent.com，必须和其它联网模块用同一套代理：
 	// Go 的默认 Transport 只认环境变量、不读 Windows 系统代理，不注入的话
 	// 在需要代理的网络里「检查更新」必然失败（表现为连接被强制关闭）。

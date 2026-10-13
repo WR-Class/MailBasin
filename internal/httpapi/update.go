@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	mailboxservice "icloud-privacy-mail-v2/internal/mailbox"
 )
 
 // 更新器由这个计划任务承载，不是本进程的子进程。理由是要停掉、替换、再启动的正是本进程：
@@ -110,6 +112,46 @@ func jobActiveStatus(status string) bool {
 	}
 }
 
+// updateJobStatus 是更新守卫需要读的那两个后台任务状态。
+//
+// 为什么在这里收窄成两方法的接口：守卫只需要读状态，不需要 mailbox 服务的其它六十来个
+// 方法。窄接口让「任务在跑就拒绝」这条判断可以在不启动真邮件任务的前提下被测到——真任务
+// 要连 IMAP、要动真数据，测试里不该碰。要说清的是：这个接口上的假实现只证明判断与接线，
+// 不证明真实任务的生命周期；那个生命周期归 mailbox 包自己的测试管。
+type updateJobStatus interface {
+	ExistingMailboxMessageSyncStatus() mailboxservice.ExistingMailboxMessageSyncJob
+	AppleMailCleanupStatus() mailboxservice.AppleMailCleanupJob
+}
+
+// updateRefusal 是「这次更新该不该被拒绝」的全部判断，抽成一个纯函数。
+//
+// 抽出来是为了能测。原来这些条件散在 handleUpdateApply 里，每个条件单独看一眼都像对的，
+// 而它们之间的先后顺序、以及某个状态到底算不算「在跑」，从来没有人验过。
+//
+// 返回值 refused 为 false 时，调用方才允许去启动更新器；此时 status/code/message 无意义。
+func updateRefusal(enabled bool, syncJob mailboxservice.ExistingMailboxMessageSyncJob, cleanupJob mailboxservice.AppleMailCleanupJob, run *updateRunStatus) (status int, code, message string, refused bool) {
+	if !enabled {
+		return http.StatusBadRequest, "update_disabled", "更新功能在配置里是关闭的（update_enabled）", true
+	}
+
+	// 有任务在跑就拒绝。更新会 Stop-Process -Force，没有优雅关闭；撞上正在写库的任务
+	// 只能指望 SQLite 自己恢复，不该靠设计去赌。脚本看不到任务状态，这里看得到。
+	if jobActiveStatus(syncJob.Status) {
+		return http.StatusConflict, "update_busy_sync", fmt.Sprintf("批量同步正在进行（状态 %s），等它结束再更新", syncJob.Status), true
+	}
+	if jobActiveStatus(cleanupJob.Status) {
+		return http.StatusConflict, "update_busy_cleanup", fmt.Sprintf("Apple 邮件清理正在进行（状态 %s），等它结束再更新", cleanupJob.Status), true
+	}
+
+	// 已经有一个更新在跑。脚本自己会再查一次（那才是权威），这里早拒绝是为了让界面立刻
+	// 拿到一句人话，而不是等一次注定失败的启动。
+	if run != nil && run.Running {
+		return http.StatusConflict, "update_already_running", "已经有一个更新在跑，等它结束再说", true
+	}
+
+	return 0, "", "", false
+}
+
 // triggerUpdateTask 通过计划任务启动更新器，然后立刻返回。
 //
 // 不等它跑完：这个进程马上就会被更新器停掉，等下去只会把自己等死；而且结果本来也不该由
@@ -130,30 +172,25 @@ func triggerUpdateTask() error {
 // 任何能到达这个接口的人就能让我从任意 ref 构建并运行代码。目标固定是 origin/main，
 // 由 scripts/update.ps1 决定。
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
-	if !s.cfg.UpdateEnabled {
-		writeError(w, http.StatusBadRequest, "update_disabled", "更新功能在配置里是关闭的（update_enabled）")
+	// 先问「该不该拒绝」，再决定要不要动手：判断全在 updateRefusal 里，这里只负责把状态
+	// 取齐、把结果执行掉。
+	if status, code, message, refused := updateRefusal(
+		s.cfg.UpdateEnabled,
+		s.updateJobs.ExistingMailboxMessageSyncStatus(),
+		s.updateJobs.AppleMailCleanupStatus(),
+		s.readUpdateRunStatus(),
+	); refused {
+		writeError(w, status, code, message)
 		return
 	}
 
-	// 有任务在跑就拒绝。更新会 Stop-Process -Force，没有优雅关闭；撞上正在写库的任务
-	// 只能指望 SQLite 自己恢复，不该靠设计去赌。脚本看不到任务状态，这里看得到。
-	if job := s.mailbox.ExistingMailboxMessageSyncStatus(); jobActiveStatus(job.Status) {
-		writeError(w, http.StatusConflict, "update_busy_sync", fmt.Sprintf("批量同步正在进行（状态 %s），等它结束再更新", job.Status))
-		return
+	// 更新器由计划任务承载。这个接缝存在是为了让测试能替掉它——否则测一次「允许更新」
+	// 就等于真的启动一次更新。
+	trigger := s.updateTrigger
+	if trigger == nil {
+		trigger = triggerUpdateTask
 	}
-	if job := s.mailbox.AppleMailCleanupStatus(); jobActiveStatus(job.Status) {
-		writeError(w, http.StatusConflict, "update_busy_cleanup", fmt.Sprintf("Apple 邮件清理正在进行（状态 %s），等它结束再更新", job.Status))
-		return
-	}
-
-	// 已经有一个更新在跑。脚本自己会再查一次（那才是权威），这里早拒绝是为了让界面立刻
-	// 拿到一句人话，而不是等一次注定失败的启动。
-	if status := s.readUpdateRunStatus(); status != nil && status.Running {
-		writeError(w, http.StatusConflict, "update_already_running", "已经有一个更新在跑，等它结束再说")
-		return
-	}
-
-	if err := triggerUpdateTask(); err != nil {
+	if err := trigger(); err != nil {
 		writeError(w, http.StatusBadGateway, "update_task_failed", err.Error())
 		return
 	}
