@@ -50,7 +50,7 @@ async function submit() {
           <h1 class="max-w-md text-4xl font-black leading-tight">多源邮箱，<br />一处收拢。</h1>
           <p class="mt-5 max-w-md text-sm leading-7 text-emerald-50/85">Apple、微软、Google 与自有 IMAP 集中接入，邮箱池、邮件验证码与自动创建统一管理。</p>
         </div>
-        <div class="grid grid-cols-3 gap-3 text-xs"><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">Go 接口</div><div class="mt-1 text-emerald-100">模块化后端</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">Vue 3</div><div class="mt-1 text-emerald-100">响应式前端</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">本地运行</div><div class="mt-1 text-emerald-100">本机优先</div></div></div>
+        <div class="grid grid-cols-3 gap-3 text-xs"><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">多服务商</div><div class="mt-1 text-emerald-100">含自有 IMAP</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">邮箱池</div><div class="mt-1 text-emerald-100">统一分配与状态</div></div><div class="rounded-xl bg-white/10 p-3 backdrop-blur"><div class="font-bold">验证码</div><div class="mt-1 text-emerald-100">本地收信自动提取</div></div></div>
       </div>
 
       <div class="flex min-h-[560px] items-center p-6 sm:p-10 lg:p-12">
@@ -67,7 +67,7 @@ async function submit() {
           </div>
 
           <button class="primary-button mt-7 w-full py-3" :disabled="loading"><LoaderCircle v-if="loading" :size="18" class="animate-spin" /><ShieldCheck v-else :size="18" />{{ loading ? '正在处理...' : submitText }}</button>
-          <p class="mx-auto mt-5 max-w-sm text-center text-xs leading-5 text-slate-400">登录状态仅保存在安全 Cookie 中；公网部署时再启用 HTTPS 配置。</p>
+          <p class="mx-auto mt-5 max-w-sm text-center text-xs leading-5 text-slate-400">登录态存在本机数据库；Cookie 为 HttpOnly + SameSite=Strict，默认不开 Secure。服务只监听 127.0.0.1，对外暴露前请开启 secure_cookie 并套上 HTTPS。</p>
         </form>
       </div>
     </section>
