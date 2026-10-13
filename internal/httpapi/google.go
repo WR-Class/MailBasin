@@ -61,14 +61,16 @@ func (s *Server) handleGoogleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": s.googleStatus()})
 }
 
-func (s *Server) handleGoogleAccounts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleGoogleAccounts(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, query := accountListPage(r)
+	result := s.store.AccountsPage(domain.ProviderGoogle, "", query, page, pageSize, false)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
-		"data": map[string]any{
-			"items":        s.store.GoogleAccounts(),
+		"data": withPageFields(map[string]any{
+			"items":        result.Items,
 			"module":       s.googleStatus(),
 			"module_ready": s.cfg.GoogleEnabled,
-		},
+		}, result.Page, result.PageSize, result.Total, result.TotalPages),
 	})
 }
 

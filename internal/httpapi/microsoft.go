@@ -68,15 +68,16 @@ func (s *Server) handleMicrosoftStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": s.microsoftStatus()})
 }
 
-func (s *Server) handleMicrosoftAccounts(w http.ResponseWriter, _ *http.Request) {
-	items := s.store.MicrosoftAccounts()
+func (s *Server) handleMicrosoftAccounts(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, query := accountListPage(r)
+	result := s.store.AccountsPage(domain.ProviderMicrosoft, "", query, page, pageSize, false)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
-		"data": map[string]any{
-			"items":        items,
+		"data": withPageFields(map[string]any{
+			"items":        result.Items,
 			"module":       s.microsoftStatus(),
 			"module_ready": s.cfg.MicrosoftEnabled,
-		},
+		}, result.Page, result.PageSize, result.Total, result.TotalPages),
 	})
 }
 

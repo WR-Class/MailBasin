@@ -1,12 +1,13 @@
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { Apple, CheckCircle2, CloudDownload, Eye, EyeOff, KeyRound, LoaderCircle, Mail, MailPlus, Plus, RefreshCw, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { Apple, CheckCircle2, CloudDownload, Eye, EyeOff, KeyRound, LoaderCircle, Mail, MailPlus, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import CardSelect from '../components/CardSelect.vue'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
 import AccountInboxPanel from '../components/AccountInboxPanel.vue'
+import ListPager from '../components/ListPager.vue'
 
 const loading = ref(true)
 const busyActions = ref([])
@@ -17,6 +18,14 @@ const showPassword = ref(true)
 const showIMAPPassword = ref(true)
 const data = ref({ items: [], module_ready: true })
 const selected = ref(null)
+// 列表分页：账号会越加越多，一次全渲染到页面上既慢又重，所以只取当前这一页。
+// 搜索和分页一起存在才有用：只有分页时找一条记录要点几十次「下一页」，
+// 只有搜索时一次匹配几百条又会把体积问题原样搬回来。
+const page = ref(1)
+const query = ref('')
+const total = ref(0)
+const totalPages = ref(1)
+let searchTimer
 const pending = reactive({ id: '', code: '', phoneNumber: '' })
 const login = reactive({ flow: 'apple_account', apple_id: '', password: '', two_factor_method: 'trusted_device' })
 const imap = reactive({ email: '', app_password: '' })
@@ -139,9 +148,15 @@ async function load(options = {}) {
   const silent = Boolean(options.silent)
   if (!silent) loading.value = true
   try {
-    data.value = await api('/api/apple-accounts')
+    const params = new URLSearchParams({ page: String(page.value) })
+    if (query.value.trim()) params.set('q', query.value.trim())
+    const payload = await api(`/api/apple-accounts?${params.toString()}`)
+    data.value = payload
+    total.value = payload.total || 0
+    totalPages.value = payload.total_pages || 1
+    page.value = payload.page || 1
     if (selected.value) {
-      const current = data.value.items.find((item) => item.id === selected.value.id)
+      const current = (payload.items || []).find((item) => item.id === selected.value.id)
       if (current) {
         selected.value = {
           ...current,
@@ -150,6 +165,8 @@ async function load(options = {}) {
           imap_app_password: selected.value.imap_app_password || '',
         }
       }
+      // 翻页或搜索之后选中项可能已经不在当前页上。不清掉的话右侧会显示一个列表里
+      // 根本看不到的账号，看起来像它被删了。
       else selected.value = null
     }
   } catch (err) {
@@ -157,6 +174,11 @@ async function load(options = {}) {
   } finally {
     if (!silent) loading.value = false
   }
+}
+
+function changePage(target) {
+  page.value = target
+  load()
 }
 
 function scheduleRealtimeRefresh(change) {
@@ -317,6 +339,16 @@ async function syncMailboxes() {
   }
 }
 
+// 搜索防抖：每敲一个字就发一次请求既浪费，也会让列表在打字时不停闪。
+// 搜索时回到第一页——停在第五页搜一个只有两条结果的词，会看到空列表。
+watch(query, () => {
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    page.value = 1
+    load()
+  }, 300)
+})
+
 onMounted(() => {
   load()
   realtimeUnsubscribe = subscribeRealtime(['apple-account', 'apple-session'], scheduleRealtimeRefresh)
@@ -324,6 +356,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.clearTimeout(realtimeRefreshTimer)
+  window.clearTimeout(searchTimer)
   realtimeUnsubscribe()
 })
 </script>
@@ -343,8 +376,8 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Apple 账号</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选择账号后可在右侧查看各通道状态</p></div><span>{{ data.items?.length || 0 }} 个账号</span></header>
-          <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 Apple 账号</strong><small>点击“添加 Apple 账号”完成首次协议登录。</small></div>
+          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选择账号后可在右侧查看各通道状态</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
+          <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Apple 账号' : '还没有 Apple 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Apple 账号”完成首次协议登录。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
@@ -359,6 +392,7 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </div>
+          <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个账号" :loading="loading" @change="changePage" />
         </section>
 
         <aside class="apple-detail-panel">

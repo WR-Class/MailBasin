@@ -1,12 +1,13 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { AlertCircle, CheckCircle2, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Server, Trash2, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, FileUp, Inbox, KeyRound, LoaderCircle, MailOpen, Plus, RefreshCw, Search, Server, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
 import AccountInboxPanel from '../components/AccountInboxPanel.vue'
+import ListPager from '../components/ListPager.vue'
 
 // QQ 和 163 共用这一个组件，靠路由上的 preset 分开。
 // 两者协议完全相同，只是服务器地址不同，所以复制一份页面没有意义。
@@ -22,6 +23,14 @@ const showCreate = ref(false)
 const showAddAddress = ref(false)
 const data = ref({ items: [], module: {} })
 const selected = ref(null)
+// 列表分页：几百个母号一次全渲染既慢又重，所以只取当前这一页。
+// 搜索和分页必须一起存在——只有分页时，在几百行里找一条要点几十次「下一页」；
+// 只有搜索时，一次匹配到几百条又把体积问题原样搬回来。
+const page = ref(1)
+const query = ref('')
+const total = ref(0)
+const totalPages = ref(1)
+let searchTimer
 const createForm = reactive({ email: '', secret: '', host: '', port: 0, username: '', label: '', note: '', raw: '' })
 const addressForm = reactive({ raw: '' })
 // 批量添加：一次建多个彼此独立的母号，每行「邮箱:授权码」。
@@ -133,7 +142,15 @@ async function load(options = {}) {
   const silent = Boolean(options.silent)
   if (!silent) loading.value = true
   try {
-    data.value = await api(`/api/imap-accounts?preset=${encodeURIComponent(preset.value)}`)
+    const params = new URLSearchParams({ preset: preset.value, page: String(page.value) })
+    if (query.value.trim()) params.set('q', query.value.trim())
+    const payload = await api(`/api/imap-accounts?${params.toString()}`)
+    data.value = payload
+    total.value = payload.total || 0
+    totalPages.value = payload.total_pages || 1
+    page.value = payload.page || 1
+    // 翻页或搜索之后选中项可能已经不在当前页上。不清掉的话右侧会显示一个列表里
+    // 根本看不到的母号，看起来像它被删了。
     if (selected.value) {
       const current = accounts.value.find((item) => item.id === selected.value.id)
       if (current) selected.value = current
@@ -144,6 +161,11 @@ async function load(options = {}) {
   } finally {
     if (!silent) loading.value = false
   }
+}
+
+function changePage(target) {
+  page.value = target
+  load()
 }
 
 function selectAccount(account) {
@@ -342,6 +364,138 @@ async function deleteAccount(account) {
   }
 }
 
+// 勾选：批量同步和批量入池作用在勾中的母号上；一个都没勾时按当前筛选条件的全部算。
+// 两种都要——挑几个处理，和「别再让我点 456 次」都是真实需求。
+const checkedIDs = ref([])
+const allPageChecked = computed(() => accounts.value.length > 0 && accounts.value.every((account) => checkedIDs.value.includes(account.id)))
+const somePageChecked = computed(() => !allPageChecked.value && accounts.value.some((account) => checkedIDs.value.includes(account.id)))
+
+// 批量操作的进度。后端一次只处理一小批，这里循环调用并报出已完成的数量：
+// 几分钟不吭声的一次性请求既看不到进度，也容易被浏览器或代理掐断。
+const batch = reactive({ running: false, label: '', done: 0, total: 0, failed: 0 })
+// 每批多少个母号。太小则往返次数多，太大则单次请求又变成「几分钟不吭声」。
+const BATCH_SYNC_CHUNK = 10
+
+function togglePageSelection() {
+  const ids = accounts.value.map((account) => account.id)
+  if (allPageChecked.value) checkedIDs.value = checkedIDs.value.filter((id) => !ids.includes(id))
+  else checkedIDs.value = [...new Set([...checkedIDs.value, ...ids])]
+}
+
+function toggleAccountSelection(account) {
+  checkedIDs.value = checkedIDs.value.includes(account.id)
+    ? checkedIDs.value.filter((id) => id !== account.id)
+    : [...checkedIDs.value, account.id]
+}
+
+// 「当前筛选下的全部」由服务端一次查出来，再原样传回去执行：确认框里显示的那个数
+// 和实际动的那个数是同一批标识，不会出现「说 456 个、实际动了 461 个」。
+async function resolveTargetIDs() {
+  if (checkedIDs.value.length) return [...checkedIDs.value]
+  const params = new URLSearchParams({ preset: preset.value })
+  if (query.value.trim()) params.set('q', query.value.trim())
+  const payload = await api(`/api/imap-accounts/ids?${params.toString()}`)
+  return payload.ids || []
+}
+
+// 按钮的悬停说明必须说清这一次会动到多少个：勾选和「当前筛选全部」的区别，
+// 在界面上只体现为这一行字。使用者点下去之前就该知道自己将影响几个母号。
+function batchScopeTitle(action) {
+  if (checkedIDs.value.length) return `对已勾选的 ${checkedIDs.value.length} 个母号${action}`
+  return `对当前筛选下的全部 ${total.value} 个母号${action}`
+}
+
+async function runBatchSync() {
+  if (batch.running) return
+  let ids
+  try {
+    ids = await resolveTargetIDs()
+  } catch (err) {
+    flash(err.message, true)
+    return
+  }
+  if (!ids.length) {
+    flash('当前筛选下没有母号', true)
+    return
+  }
+  const ok = await confirmAction({
+    title: `批量同步${presetLabel.value}`,
+    message: `将逐个读取 ${ids.length} 个母号名下所有地址的收件箱。数量多时需要几分钟，期间请不要关闭页面。`,
+    confirmText: '开始同步',
+  })
+  if (!ok) return
+  batch.running = true
+  batch.label = '同步'
+  batch.done = 0
+  batch.failed = 0
+  batch.total = ids.length
+  let synced = 0
+  try {
+    for (let start = 0; start < ids.length; start += BATCH_SYNC_CHUNK) {
+      const chunk = ids.slice(start, start + BATCH_SYNC_CHUNK)
+      const payload = await api('/api/imap-accounts/sync-batch', {
+        method: 'POST',
+        body: JSON.stringify({ account_ids: chunk }),
+      })
+      synced += payload.synced_messages || 0
+      batch.failed += payload.failed || 0
+      batch.done = Math.min(start + chunk.length, ids.length)
+    }
+    flash(batch.failed
+      ? `批量同步完成：成功 ${ids.length - batch.failed} 个，失败 ${batch.failed} 个，共取到 ${synced} 封`
+      : `批量同步完成：${ids.length} 个母号全部成功，共取到 ${synced} 封`)
+  } catch (err) {
+    // 中断时如实说出停在哪里，已经同步好的那些是有效的，重跑不会重复收信。
+    flash(`批量同步中断于 ${batch.done}/${ids.length}：${err.message}`, true)
+  } finally {
+    batch.running = false
+    checkedIDs.value = []
+    await load({ silent: true })
+  }
+}
+
+async function runBatchPool(inPool) {
+  if (batch.running) return
+  let ids
+  try {
+    ids = await resolveTargetIDs()
+  } catch (err) {
+    flash(err.message, true)
+    return
+  }
+  if (!ids.length) {
+    flash('当前筛选下没有母号', true)
+    return
+  }
+  const ok = await confirmAction({
+    title: inPool ? '批量放进邮箱池' : '批量移出邮箱池',
+    message: inPool
+      ? `将把 ${ids.length} 个母号名下的全部地址加入邮箱池。`
+      : `将把 ${ids.length} 个母号名下的全部地址移出邮箱池，之后它们只在母号页面可见。`,
+    confirmText: inPool ? '加入邮箱池' : '移出邮箱池',
+  })
+  if (!ok) return
+  batch.running = true
+  batch.label = inPool ? '入池' : '出池'
+  batch.done = 0
+  batch.failed = 0
+  batch.total = ids.length
+  try {
+    const payload = await api('/api/imap-accounts/pool-batch', {
+      method: 'POST',
+      body: JSON.stringify({ account_ids: ids, in_pool: inPool }),
+    })
+    batch.done = ids.length
+    flash(`${ids.length} 个母号已处理，${payload.updated_mailboxes || 0} 个地址${inPool ? '加入' : '移出'}邮箱池`)
+  } catch (err) {
+    flash(err.message, true)
+  } finally {
+    batch.running = false
+    checkedIDs.value = []
+    await load({ silent: true })
+  }
+}
+
 function scheduleRealtimeRefresh(change) {
   if (change.resource !== 'mailbox' && change.resource !== 'apple-account') return
   window.clearTimeout(realtimeRefreshTimer)
@@ -361,12 +515,28 @@ onMounted(async () => {
 // 服务商的列表和限额说明，正是要修的那个现象。
 watch(preset, () => {
   selected.value = null
+  page.value = 1
+  query.value = ''
+  // 勾选跟着 preset 清空：QQ 页面上勾的母号在 163 页面上不该还生效。
+  // 换页和搜索则刻意保留勾选——跨页挑选本来就是勾选存在的意义。
+  checkedIDs.value = []
   data.value = { items: [], module: {} }
   load()
 })
 
+// 搜索防抖：每敲一个字就发一次请求既浪费，也会让列表在打字时不停闪。
+// 搜索时回到第一页——停在第五页搜一个只有两条结果的词，会看到空列表。
+watch(query, () => {
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    page.value = 1
+    load()
+  }, 300)
+})
+
 onBeforeUnmount(() => {
   window.clearTimeout(realtimeRefreshTimer)
+  window.clearTimeout(searchTimer)
   realtimeUnsubscribe()
 })
 </script>
@@ -380,8 +550,19 @@ onBeforeUnmount(() => {
           <button class="primary-button apple-command-button" title="添加一个邮箱，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加{{ presetLabel }}</button>
           <button class="secondary-button apple-command-button" title="一次粘贴多个邮箱，每行「邮箱:授权码」，每行都是独立的母号" @click="openBatchDialog"><FileUp :size="14" />批量添加</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该邮箱名下所有地址的收件箱' : '请先选择一个邮箱'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此邮箱</button>
+          <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('读一遍名下所有地址的收件箱')" @click="runBatchSync"><LoaderCircle v-if="batch.running && batch.label === '同步'" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />{{ batch.running && batch.label === '同步' ? `同步中 ${batch.done}/${batch.total}` : '批量同步' }}</button>
+          <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('把名下所有地址加入邮箱池')" @click="runBatchPool(true)"><Inbox :size="14" />批量入池</button>
+          <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('把名下所有地址移出邮箱池')" @click="runBatchPool(false)"><Inbox :size="14" />批量出池</button>
         </div>
       </header>
+
+      <div v-if="batch.running || checkedIDs.length" class="apple-module-note">
+        <LoaderCircle v-if="batch.running" :size="14" class="animate-spin" />
+        <AlertCircle v-else :size="14" />
+        <span v-if="batch.running">正在批量{{ batch.label }}：{{ batch.done }} / {{ batch.total }}<template v-if="batch.failed">，已失败 {{ batch.failed }}</template></span>
+        <span v-else>已勾选 {{ checkedIDs.length }} 个母号，批量操作只作用在它们身上；一个都不勾则按当前筛选下的全部 {{ total }} 个算。</span>
+        <button v-if="!batch.running" type="button" class="secondary-button apple-check-button" @click="checkedIDs = []">清除勾选</button>
+      </div>
 
       <div v-if="moduleInfo.limit" class="apple-module-note">
         <AlertCircle :size="14" />
@@ -391,14 +572,15 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载{{ presetLabel }}</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后可在右侧查看它名下的地址</p></div><span>{{ accounts.length }} 个</span></header>
-          <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 {{ presetLabel }}</strong><small>点击“添加{{ presetLabel }}”，填入邮箱地址和客户端授权码。</small></div>
+          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后可在右侧查看它名下的地址</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱或标签" aria-label="搜索邮箱或标签" /></label><span>总 {{ total }} 个</span></header>
+          <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的' + presetLabel : '还没有 ' + presetLabel }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : `点击“添加${presetLabel}”，填入邮箱地址和客户端授权码。` }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
-              <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
-              <thead><tr><th>邮箱</th><th>状态</th><th>地址</th><th>操作</th></tr></thead>
+              <colgroup><col class="apple-col-check" /><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
+              <thead><tr><th class="apple-check-cell"><input type="checkbox" :checked="allPageChecked" :indeterminate="somePageChecked" :disabled="!accounts.length" title="全选本页" aria-label="全选本页母号" @change="togglePageSelection" /></th><th>邮箱</th><th>状态</th><th>地址</th><th>操作</th></tr></thead>
               <tbody>
                 <tr v-for="account in accounts" :key="account.id" class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-label="`查看 ${account.label || account.apple_id} 的地址`" @click="selectAccount(account)" @keydown.enter="selectAccount(account)" @keydown.space.prevent="selectAccount(account)">
+                  <td class="apple-check-cell"><input type="checkbox" :checked="checkedIDs.includes(account.id)" :aria-label="`勾选 ${account.label || account.apple_id}`" @click.stop @change="toggleAccountSelection(account)" /></td>
                   <td><button type="button" class="apple-account-select" @click.stop="selectAccount(account)"><span class="apple-account-icon"><MailOpen :size="14" /></span><span><strong>{{ account.label || account.apple_id }}</strong><small>{{ account.apple_id }}</small></span></button></td>
                   <td><span :class="statusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span class="apple-channel-pill"><Inbox :size="11" /><span>{{ account.mailbox_count || 0 }} 个地址</span><em v-if="account.pool_count" class="bg-sky-50 text-sky-600 dark:bg-sky-950/30 dark:text-sky-300">其中 {{ account.pool_count }} 个进池</em></span></div></td>
@@ -407,6 +589,7 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </div>
+          <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个母号" :loading="loading" @change="changePage" />
         </section>
 
         <aside class="apple-detail-panel">

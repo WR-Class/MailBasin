@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"icloud-privacy-mail-v2/internal/domain"
 	mailboxservice "icloud-privacy-mail-v2/internal/mailbox"
 	"icloud-privacy-mail-v2/internal/protocol"
 )
@@ -34,15 +35,16 @@ func imapPresetHint(preset string) imapAccountModuleStatus {
 	}
 }
 
-// handleIMAPAccounts 列出一个 preset 下的全部 IMAP 母号及其地址。
+// handleIMAPAccounts 列出一个 preset 下的 IMAP 母号及其地址，分页返回。
 // 母号名下的地址一律全部返回，包括使用者选择不进邮箱池的那些。
 func (s *Server) handleIMAPAccounts(w http.ResponseWriter, r *http.Request) {
 	preset := strings.TrimSpace(r.URL.Query().Get("preset"))
-	items := s.mailbox.IMAPAccounts(preset)
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
-		"items":  items,
+	page, pageSize, query := accountListPage(r)
+	result := s.mailbox.IMAPAccounts(preset, query, page, pageSize)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": withPageFields(map[string]any{
+		"items":  result.Items,
 		"module": imapPresetHint(preset),
-	}})
+	}, result.Page, result.PageSize, result.Total, result.TotalPages)})
 }
 
 // handleIMAPAccount 取一个母号的详情，连同它名下的地址。
@@ -207,4 +209,67 @@ func (s *Server) handleMailboxPoolVisibility(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
 		"id": mailbox.ID, "email": mailbox.Email, "in_pool": !mailbox.PoolHidden,
 	}})
+}
+
+// handleIMAPAccountIDs 返回当前筛选条件下的全部母号标识，不分页。
+//
+// 批量操作用的。「当前筛选下的全部」是使用者点下按钮那一刻看见的那个数，
+// 由前端先取回来、显示在确认框里，再原样传回去执行——中间不会有第二次查询，
+// 也就不会出现「确认框说 456 个、实际动了 461 个」。
+func (s *Server) handleIMAPAccountIDs(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+	ids := s.store.AccountIDs(domain.ProviderIMAP, values.Get("preset"), values.Get("q"))
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{
+		"ids": ids, "total": len(ids),
+	}})
+}
+
+// decodeIMAPBatchSelection 解析批量操作的请求体，并挡住空列表。
+func decodeIMAPBatchSelection(w http.ResponseWriter, r *http.Request) (mailboxservice.IMAPBatchSelection, bool) {
+	var body mailboxservice.IMAPBatchSelection
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return body, false
+	}
+	if len(body.AccountIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "missing_account_ids", "请指定要处理的母号")
+		return body, false
+	}
+	return body, true
+}
+
+// handleIMAPAccountSyncBatch 同步一批母号。
+//
+// 前端按小批循环调用这个端点，所以这里刻意不并发到底：一次请求只处理它拿到的那些，
+// 进度由调用方逐批显示。一个会话里跑完几百个母号的进度条，比一个几分钟不吭声、
+// 还可能被浏览器或代理掐断的请求好得多。
+func (s *Server) handleIMAPAccountSyncBatch(w http.ResponseWriter, r *http.Request) {
+	selection, ok := decodeIMAPBatchSelection(w, r)
+	if !ok {
+		return
+	}
+	result := s.mailbox.SyncIMAPAccountsBySelection(r.Context(), selection)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
+}
+
+// handleIMAPAccountPoolBatch 把一批母号名下的全部地址加入或移出邮箱池。
+func (s *Server) handleIMAPAccountPoolBatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AccountIDs []string `json:"account_ids"`
+		InPool     *bool    `json:"in_pool"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if len(body.AccountIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "missing_account_ids", "请指定要处理的母号")
+		return
+	}
+	if body.InPool == nil {
+		writeError(w, http.StatusBadRequest, "missing_in_pool", "请说明要放进邮箱池还是移出")
+		return
+	}
+	result := s.mailbox.SetIMAPAccountsPool(mailboxservice.IMAPBatchSelection{AccountIDs: body.AccountIDs}, *body.InPool)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": result})
 }

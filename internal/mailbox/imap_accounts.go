@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"icloud-privacy-mail-v2/internal/domain"
 	"icloud-privacy-mail-v2/internal/protocol"
@@ -39,22 +40,25 @@ func buildIMAPAccountView(account domain.AppleAccount, mailboxes []domain.Mailbo
 	return view
 }
 
-// IMAPAccounts 按 preset 返回母号列表；preset 为空时返回全部 IMAP 母号。
+// IMAPAccounts 按 preset 返回母号列表的一页；preset 为空时返回全部 IMAP 母号。
 // 三个界面（QQ 邮箱 / 163 邮箱 / Gmail）用的是同一个函数，只是传入的 preset 不同。
-func (s *Service) IMAPAccounts(preset string) []IMAPAccountView {
-	preset = strings.ToLower(strings.TrimSpace(preset))
-	accounts := s.store.Accounts(domain.ProviderIMAP)
-	// 一次取回全部邮箱再分组，不在每个母号里各查一次：母号列表页一次要渲染几百个
-	// 母号，逐个查就是几百次全表解密，实测 456 个母号要 13 秒。
-	grouped := s.store.MailboxesGroupedByAccount()
-	views := make([]IMAPAccountView, 0, len(accounts))
-	for _, account := range accounts {
-		if preset != "" && strings.ToLower(strings.TrimSpace(account.Preset)) != preset {
-			continue
-		}
+func (s *Service) IMAPAccounts(preset, query string, page, pageSize int) domain.Page[IMAPAccountView] {
+	accounts := s.store.AccountsPage(domain.ProviderIMAP, preset, query, page, pageSize, false)
+	// 只给当前这一页的母号取地址：一页二十个母号就该只解二十份地址，
+	// 而不是每翻一页都把整张 mailboxes 表读一遍。
+	ids := make([]string, 0, len(accounts.Items))
+	for _, account := range accounts.Items {
+		ids = append(ids, account.ID)
+	}
+	grouped := s.store.MailboxesForAccounts(ids)
+	views := make([]IMAPAccountView, 0, len(accounts.Items))
+	for _, account := range accounts.Items {
 		views = append(views, buildIMAPAccountView(account, grouped[account.ID]))
 	}
-	return views
+	return domain.Page[IMAPAccountView]{
+		Items: views, Page: accounts.Page, PageSize: accounts.PageSize,
+		Total: accounts.Total, TotalPages: accounts.TotalPages,
+	}
 }
 
 // FindIMAPAccount 按标识取一个母号，并确认它确实是 IMAP 母号。
@@ -262,4 +266,129 @@ func (s *Service) SetMailboxPoolHidden(mailboxID string, hidden bool) (domain.Ma
 	_ = s.store.RecordEvent("info", "mailbox", fmt.Sprintf("%s 已%s邮箱池",
 		mailbox.Email, map[bool]string{true: "移出", false: "加入"}[hidden]))
 	return mailbox, nil
+}
+
+// IMAPBatchSelection 是一批批量操作要作用到的母号。
+//
+// 只接受明确的标识列表，不做「空列表＝全部」这种兜底：那种语义一旦存在，
+// 任何一次前端的小 bug 都会在几百个母号上跑一遍同步或改一遍可见性，
+// 而使用者只会看到界面「自己动了」。「全部」这个范围由调用方先查出来，
+// 再显式地传进来——那一刻它是个数字，使用者能看见也能确认。
+type IMAPBatchSelection struct {
+	AccountIDs []string `json:"account_ids"`
+}
+
+func (s IMAPBatchSelection) trimmed() []string {
+	out := make([]string, 0, len(s.AccountIDs))
+	for _, accountID := range s.AccountIDs {
+		if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// IMAPBatchSyncFailure 记下一个母号为什么没同步成功。
+// 批量操作最需要知道的就是这个：只说「失败 3 个」等于没说，使用者无从下手。
+type IMAPBatchSyncFailure struct {
+	AccountID string `json:"account_id"`
+	Account   string `json:"account,omitempty"`
+	Reason    string `json:"reason"`
+}
+
+type IMAPBatchSyncResult struct {
+	Total          int                    `json:"total"`
+	Succeeded      int                    `json:"succeeded"`
+	Failed         int                    `json:"failed"`
+	SyncedMessages int                    `json:"synced_messages"`
+	Failures       []IMAPBatchSyncFailure `json:"failures"`
+}
+
+// SyncIMAPAccountsBySelection 同步一批母号。
+//
+// 并发但限流：Gmail 对同一时间打开的 IMAP 连接有配额，几百个母号一起拨过去会被拒，
+// 而被拒的那些会带着「同步失败」被记进使用者的账号状态里——一次批量操作把数据弄脏
+// 比它慢几秒糟糕得多。前端按小批循环调用，进度因此是实时的，也可以中途停下。
+func (s *Service) SyncIMAPAccountsBySelection(ctx context.Context, selection IMAPBatchSelection) IMAPBatchSyncResult {
+	const workers = 4
+	ids := selection.trimmed()
+	result := IMAPBatchSyncResult{Total: len(ids), Failures: []IMAPBatchSyncFailure{}}
+	if len(ids) == 0 {
+		return result
+	}
+
+	// 带缓冲、一次投满再关闭：投递永远不会阻塞，也就不会出现「四个 worker 都提前
+	// 退出之后发送方卡死」这种只在超时路径上才现形的死锁。
+	queue := make(chan string, len(ids))
+	for _, accountID := range ids {
+		queue <- accountID
+	}
+	close(queue)
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for accountID := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+				account, ok := s.store.FindAppleAccount(accountID)
+				if !ok || account.ProviderOrDefault() != domain.ProviderIMAP {
+					mu.Lock()
+					result.Failed++
+					result.Failures = append(result.Failures, IMAPBatchSyncFailure{AccountID: accountID, Reason: "IMAP 母号不存在"})
+					mu.Unlock()
+					continue
+				}
+				stored, err := s.SyncIMAPAccount(ctx, accountID)
+				mu.Lock()
+				if err != nil {
+					result.Failed++
+					result.Failures = append(result.Failures, IMAPBatchSyncFailure{
+						AccountID: accountID,
+						Account:   firstNonEmpty(account.Label, account.AppleID, accountID),
+						Reason:    err.Error(),
+					})
+				} else {
+					result.Succeeded++
+					result.SyncedMessages += stored
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	return result
+}
+
+type IMAPBatchPoolResult struct {
+	TotalAccounts   int  `json:"total_accounts"`
+	UpdatedMailboxes int `json:"updated_mailboxes"`
+	InPool          bool `json:"in_pool"`
+}
+
+// SetIMAPAccountsPool 把一批母号名下的全部地址加入或移出邮箱池。
+//
+// 按母号而不是按地址：使用者勾的是母号，他脑子里的对象也是母号。让他先展开每个母号
+// 再逐个勾地址，正是他现在抱怨的那件事。
+//
+// 已经处于目标状态的地址不计数、也不写库：重复点一次不该把「已更新 456 个」报出来。
+func (s *Service) SetIMAPAccountsPool(selection IMAPBatchSelection, inPool bool) IMAPBatchPoolResult {
+	ids := selection.trimmed()
+	result := IMAPBatchPoolResult{TotalAccounts: len(ids), InPool: inPool}
+	hidden := !inPool
+	for _, accountID := range ids {
+		for _, mailbox := range s.store.MailboxesByAccount(accountID) {
+			if mailbox.PoolHidden == hidden {
+				continue
+			}
+			if _, err := s.SetMailboxPoolHidden(mailbox.ID, hidden); err == nil {
+				result.UpdatedMailboxes++
+			}
+		}
+	}
+	return result
 }

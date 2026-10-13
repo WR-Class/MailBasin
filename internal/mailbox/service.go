@@ -1294,6 +1294,46 @@ func (s *Service) syncGroup(ctx context.Context, key string, mailboxes []domain.
 	return call.result, call.err
 }
 
+// syncIMAPGroupNow 同步一个 IMAP 母号名下的地址。
+//
+// 一个母号的多个地址共用一个收件箱，逐地址同步会重复读同一批信；但路由是按收件人
+// 精确匹配的，必须每个地址都走一遍才能把它们各自归位——这与 SyncIMAPAccount 一致。
+// 单个地址失败不拖掉整批：批量同步里最需要知道的就是「哪一个失败了、为什么」。
+func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailbox, accountResult AccountMessageSyncResult) (AccountMessageSyncResult, error) {
+	accountResult.Method = "imap"
+	stored := 0
+	var failures []string
+	for _, mailbox := range mailboxes {
+		if err := ctx.Err(); err != nil {
+			return accountResult, err
+		}
+		count, err := s.SyncIMAPMailbox(ctx, mailbox.ID)
+		if err != nil {
+			code, message, _ := protocol.ErrorDetails(err)
+			failures = append(failures, mailbox.Email+"（"+firstNonEmpty(code, message)+"）")
+			continue
+		}
+		stored += count
+	}
+	accountResult.SyncedMessages += stored
+	accountResult.Scanned += stored
+	accountID := strings.TrimSpace(accountResult.AccountID)
+	if len(failures) == len(mailboxes) && len(mailboxes) > 0 {
+		// 全军覆没多半是授权码或服务器地址的问题，如实标出来而不是留个「正常」。
+		if accountID != "" {
+			_ = s.store.SetIMAPAccountStatus(accountID, "failed", "同步失败："+strings.Join(failures, "，"))
+		}
+		return accountResult, errors.New("全部地址同步失败：" + strings.Join(failures, "，"))
+	}
+	if len(failures) > 0 {
+		if accountID != "" {
+			_ = s.store.SetIMAPAccountStatus(accountID, "partial", "部分地址同步失败："+strings.Join(failures, "，"))
+		}
+		accountResult.FallbackReason = "部分地址同步失败：" + strings.Join(failures, "，")
+	}
+	return accountResult, nil
+}
+
 func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, options MessageSyncOptions) (AccountMessageSyncResult, error) {
 	refreshed := make([]domain.Mailbox, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
@@ -1319,6 +1359,13 @@ func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, 
 	// Google 账号走 Gmail REST API，同样是独立的第三条路径。
 	if provider == domain.ProviderGoogle {
 		return s.syncGoogleGroupNow(ctx, refreshed, options, accountResult)
+	}
+	// IMAP 母号（QQ / 163 / Gmail）没有 Apple 登录态：它的授权码存在邮箱自己身上，
+	// 由 SyncIMAPMailbox 按 ID 重读。少了这一条分支，它会掉到下面的 iCloud 路径，
+	// 报「对应 Apple 账号登录态不存在」——而那个提示会让人以为要去重新登录 Apple，
+	// 这个邮箱却根本没有 Apple 账号，于是使用者只能干看着一个查不出原因的失败。
+	if provider == domain.ProviderIMAP {
+		return s.syncIMAPGroupNow(ctx, refreshed, accountResult)
 	}
 	session, ok := s.store.ICloudSessionByAccountID(accountID)
 	if !ok {

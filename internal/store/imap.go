@@ -183,25 +183,48 @@ func (s *Store) MailboxesByAccount(accountID string) []domain.Mailbox {
 	return out
 }
 
-// MailboxesGroupedByAccount 一次取回全部邮箱并按母号分组。
+// MailboxesForAccounts 一次取回这些母号名下的全部邮箱并按母号分组。
 //
-// 母号列表页要一次渲染几百个母号，逐个母号调一次 MailboxesByAccount 就是 N+1。
-// 这里只读一次、只解密一次，调用方自己按 account_id 取。
-func (s *Store) MailboxesGroupedByAccount() map[string][]domain.Mailbox {
+// 传空表示不限母号（取全部）。列表页只渲染一页母号，就该只取这一页的地址：
+// 逐个母号查是 N+1，而不带条件地取全部只是把 N+1 换成了「每次都读整张表」——
+// 数据量再涨一次，同一个问题会原样回来。
+func (s *Store) MailboxesForAccounts(accountIDs []string) map[string][]domain.Mailbox {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []domain.Mailbox
-	if err := s.loadEntities("mailboxes", `json_extract(data_json, '$.created_at')`, &out); err != nil {
+	query := `SELECT data_json FROM mailboxes`
+	args := []any{}
+	if len(accountIDs) > 0 {
+		placeholders := make([]string, 0, len(accountIDs))
+		for _, accountID := range accountIDs {
+			placeholders = append(placeholders, "?")
+			args = append(args, strings.TrimSpace(accountID))
+		}
+		query += ` WHERE json_extract(data_json, '$.account_id') IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	query += ` ORDER BY json_extract(data_json, '$.created_at'), id`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
 		return map[string][]domain.Mailbox{}
 	}
-	grouped := make(map[string][]domain.Mailbox, len(out))
-	for index := range out {
-		accountID := strings.TrimSpace(out[index].AccountID)
+	defer rows.Close()
+	grouped := make(map[string][]domain.Mailbox, len(accountIDs))
+	for rows.Next() {
+		var data []byte
+		var mailbox domain.Mailbox
+		if rows.Scan(&data) != nil || s.decodeEntity("mailboxes", data, &mailbox) != nil {
+			continue
+		}
+		accountID := strings.TrimSpace(mailbox.AccountID)
 		if accountID == "" {
 			continue
 		}
-		stripMailboxSecrets(&out[index])
-		grouped[accountID] = append(grouped[accountID], out[index])
+		stripMailboxSecrets(&mailbox)
+		grouped[accountID] = append(grouped[accountID], mailbox)
 	}
 	return grouped
+}
+
+// MailboxesGroupedByAccount 取回全部邮箱并按母号分组。
+func (s *Store) MailboxesGroupedByAccount() map[string][]domain.Mailbox {
+	return s.MailboxesForAccounts(nil)
 }

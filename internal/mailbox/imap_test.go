@@ -2,6 +2,8 @@ package mailbox
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"icloud-privacy-mail-v2/internal/domain"
@@ -479,16 +481,115 @@ func TestIMAPAccountsFilterByPreset(t *testing.T) {
 	createIMAPAccount(t, service, "qq", "12345@qq.com", "code")
 	createIMAPAccount(t, service, "163", "someone@163.com", "code")
 
-	qq := service.IMAPAccounts("qq")
-	if len(qq) != 1 || qq[0].AppleID != "12345@qq.com" {
-		t.Fatalf("QQ 页面应只看到 QQ 母号，实际 %+v", qq)
+	qq := service.IMAPAccounts("qq", "", 1, 0)
+	if len(qq.Items) != 1 || qq.Items[0].AppleID != "12345@qq.com" {
+		t.Fatalf("QQ 页面应只看到 QQ 母号，实际 %+v", qq.Items)
 	}
-	mail163 := service.IMAPAccounts("163")
-	if len(mail163) != 1 || mail163[0].AppleID != "someone@163.com" {
-		t.Fatalf("163 页面应只看到 163 母号，实际 %+v", mail163)
+	if qq.Total != 1 || qq.TotalPages != 1 {
+		t.Fatalf("QQ 页的分页计数应为 1/1，实际 total=%d pages=%d", qq.Total, qq.TotalPages)
 	}
-	if all := service.IMAPAccounts(""); len(all) != 2 {
-		t.Fatalf("不带 preset 应看到全部 2 个，实际 %d 个", len(all))
+	mail163 := service.IMAPAccounts("163", "", 1, 0)
+	if len(mail163.Items) != 1 || mail163.Items[0].AppleID != "someone@163.com" {
+		t.Fatalf("163 页面应只看到 163 母号，实际 %+v", mail163.Items)
+	}
+	all := service.IMAPAccounts("", "", 1, 0)
+	if len(all.Items) != 2 || all.Total != 2 {
+		t.Fatalf("不带 preset 应看到全部 2 个，实际 %d 个（total=%d）", len(all.Items), all.Total)
+	}
+}
+
+// 翻页必须既不重复也不遗漏。
+//
+// 只看第一页对不对是不够的：OFFSET 算错时第一页永远是对的，错误全落在后面的页上。
+// 所以这里把所有页的母号并起来去重，必须一个不多一个不少。
+func TestIMAPAccountsPagesCoverEveryAccountExactlyOnce(t *testing.T) {
+	service := newIMAPFixture(t)
+	const total = 7
+	const pageSize = 3
+	for index := 0; index < total; index++ {
+		createIMAPAccount(t, service, "gmail", fmt.Sprintf("user%02d@gmail.com", index), "abcdefghijklmnop")
+	}
+
+	seen := map[string]int{}
+	pages := 0
+	for page := 1; ; page++ {
+		result := service.IMAPAccounts("gmail", "", page, pageSize)
+		if result.Total != total {
+			t.Fatalf("第 %d 页的 total 应为 %d，实际 %d", page, total, result.Total)
+		}
+		if result.TotalPages != 3 {
+			t.Fatalf("每页 %d 条、共 %d 条时应有 3 页，实际 %d", pageSize, total, result.TotalPages)
+		}
+		if page == 1 && len(result.Items) != pageSize {
+			t.Fatalf("首页条数应为 min(page_size,total)=%d，实际 %d", pageSize, len(result.Items))
+		}
+		if page == 3 && len(result.Items) != 1 {
+			t.Fatalf("末页条数应为 %d，实际 %d", total%pageSize, len(result.Items))
+		}
+		for _, item := range result.Items {
+			seen[item.ID]++
+		}
+		pages++
+		if page >= result.TotalPages {
+			break
+		}
+		if pages > 20 {
+			t.Fatalf("页数异常，可能有死循环")
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("逐页并集应有 %d 个不同母号，实际 %d 个", total, len(seen))
+	}
+	for id, count := range seen {
+		if count != 1 {
+			t.Fatalf("母号 %s 在翻页中出现了 %d 次", id, count)
+		}
+	}
+}
+
+// 搜索要能同时命中邮箱和标签，并且和分页一起生效。
+func TestIMAPAccountsSearchNarrowsTheTotal(t *testing.T) {
+	service := newIMAPFixture(t)
+	createIMAPAccount(t, service, "gmail", "alpha@gmail.com", "abcdefghijklmnop")
+	createIMAPAccount(t, service, "gmail", "beta@gmail.com", "abcdefghijklmnop")
+
+	if all := service.IMAPAccounts("gmail", "", 1, 0); all.Total != 2 {
+		t.Fatalf("不搜索时应看到 2 个，实际 %d", all.Total)
+	}
+	hit := service.IMAPAccounts("gmail", "alpha", 1, 0)
+	if hit.Total != 1 || len(hit.Items) != 1 || hit.Items[0].AppleID != "alpha@gmail.com" {
+		t.Fatalf("搜索 alpha 应只命中 1 个，实际 total=%d items=%+v", hit.Total, hit.Items)
+	}
+	if miss := service.IMAPAccounts("gmail", "nobody", 1, 0); miss.Total != 0 || len(miss.Items) != 0 {
+		t.Fatalf("搜不到时应为 0，实际 total=%d items=%d", miss.Total, len(miss.Items))
+	}
+}
+
+// 邮箱池里点同步，IMAP 邮箱不该走到 iCloud 那条路上去。
+//
+// 少了 IMAP 分支时它会掉进 iCloud 路径，报「对应 Apple 账号登录态不存在」——而 IMAP
+// 母号根本没有 Apple 账号，使用者照着这个提示查永远查不出问题。这里把服务器指向本机
+// 一个没人监听的端口：连接立刻被拒绝，测试既不联网也不等超时；断言的是「走没走对路」，
+// 不是「连没连上」。
+func TestIMAPMailboxSyncDoesNotClaimAnAppleSession(t *testing.T) {
+	service := newIMAPFixture(t)
+	view, _, err := service.CreateIMAPAccount("gmail", "someone@gmail.com", "abcdefghijklmnop", "127.0.0.1", 1, "", "", "", nil)
+	if err != nil {
+		t.Fatalf("建母号失败：%v", err)
+	}
+	mailboxes := service.store.MailboxesByAccount(view.ID)
+	if len(mailboxes) == 0 {
+		t.Fatalf("母号下应至少有一个地址")
+	}
+	result, err := service.SyncMailboxMessages(context.Background(), mailboxes[0].ID)
+	if err != nil && strings.Contains(err.Error(), "Apple 账号登录态不存在") {
+		t.Fatalf("IMAP 邮箱同步不该报 Apple 登录态不存在：%v", err)
+	}
+	if len(result.Accounts) == 0 {
+		t.Fatalf("同步结果里应有一个母号，实际 %+v（err=%v）", result.Accounts, err)
+	}
+	if result.Accounts[0].Method != "imap" {
+		t.Fatalf("IMAP 邮箱应走 imap 这条同步路径，实际 method=%q", result.Accounts[0].Method)
 	}
 }
 

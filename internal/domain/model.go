@@ -470,13 +470,20 @@ type Dashboard struct {
 	Events                []Event `json:"events"`
 }
 
-type MailboxPage struct {
-	Items      []Mailbox `json:"items"`
-	Page       int       `json:"page"`
-	PageSize   int       `json:"page_size"`
-	Total      int       `json:"total"`
-	TotalPages int       `json:"total_pages"`
+// Page 是任意列表接口的一页。
+//
+// 四个账号页和邮箱池共用这一个形状，前端因此只需要一套分页控件；
+// 分页字段也只在一处定义，不会两边慢慢分叉。
+type Page[T any] struct {
+	Items      []T `json:"items"`
+	Page       int `json:"page"`
+	PageSize   int `json:"page_size"`
+	Total      int `json:"total"`
+	TotalPages int `json:"total_pages"`
 }
+
+// MailboxPage 是邮箱池的分页结果，与其它列表同形。
+type MailboxPage = Page[Mailbox]
 
 type Task struct {
 	ID                       string     `json:"id"`

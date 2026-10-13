@@ -174,6 +174,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/imap-accounts", s.protected(s.handleIMAPAccountCreate))
 	// 批量添加多个彼此独立的母号。字面量比 {id} 更具体，所以不会和下面几条抢。
 	s.mux.HandleFunc("POST /api/imap-accounts/batch", s.protected(s.handleIMAPAccountBatch))
+	// 批量同步 / 批量入池。同样是字面量路径，写在 {id} 前面。
+	s.mux.HandleFunc("GET /api/imap-accounts/ids", s.protected(s.handleIMAPAccountIDs))
+	s.mux.HandleFunc("POST /api/imap-accounts/sync-batch", s.protected(s.handleIMAPAccountSyncBatch))
+	s.mux.HandleFunc("POST /api/imap-accounts/pool-batch", s.protected(s.handleIMAPAccountPoolBatch))
 	s.mux.HandleFunc("GET /api/imap-accounts/{id}", s.protected(s.handleIMAPAccount))
 	s.mux.HandleFunc("DELETE /api/imap-accounts/{id}", s.protected(s.handleIMAPAccountDelete))
 	s.mux.HandleFunc("POST /api/imap-accounts/{id}/sync", s.protected(s.handleIMAPAccountSync))
@@ -592,13 +596,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": s.store.Dashboard()})
 }
 
-func (s *Server) handleAppleAccounts(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleAppleAccounts(w http.ResponseWriter, r *http.Request) {
+	page, pageSize, query := accountListPage(r)
+	result := s.apple.AccountsPage(query, page, pageSize)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true,
-		"data": map[string]any{
-			"items":        s.apple.Accounts(),
+		"data": withPageFields(map[string]any{
+			"items":        result.Items,
 			"module_ready": true,
-		},
+		}, result.Page, result.PageSize, result.Total, result.TotalPages),
 	})
 }
 
@@ -1311,4 +1317,23 @@ func parsePositiveInt(value string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+// accountListPage 解析四个账号列表接口共用的分页参数。
+// 参数名与邮箱池一致（page / page_size / q），前端因此只需要一套分页控件。
+func accountListPage(r *http.Request) (page, pageSize int, query string) {
+	values := r.URL.Query()
+	return parsePositiveInt(values.Get("page"), 1), parsePositiveInt(values.Get("page_size"), 0), values.Get("q")
+}
+
+// withPageFields 把分页字段摊进响应体的 data 里。
+//
+// 四个接口共用它，而不是各自手写四个键：漏掉一个键时前端只在那一个页面表现异常，
+// 而那种异常看起来像前端的问题，查起来要绕一圈。
+func withPageFields(data map[string]any, page, pageSize, total, totalPages int) map[string]any {
+	data["page"] = page
+	data["page_size"] = pageSize
+	data["total"] = total
+	data["total_pages"] = totalPages
+	return data
 }

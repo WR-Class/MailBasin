@@ -302,6 +302,16 @@ func (s *Store) Accounts(provider string) []domain.AppleAccount {
 		}
 		filtered = append(filtered, out[index])
 	}
+	s.enrichAccountStatusLocked(wanted, filtered)
+	return filtered
+}
+
+// enrichAccountStatusLocked 给账号补上服务商侧的状态槽位。
+//
+// 整表列表和分页列表两条路共用它，免得两边的状态口径慢慢分叉——分页之后
+// 同一批账号可能出现在任一条路上，两处不一致就是同一行数据两种状态。
+// 调用方必须已经持有读锁。
+func (s *Store) enrichAccountStatusLocked(wanted string, filtered []domain.AppleAccount) {
 	if wanted == "" || wanted == domain.ProviderICloud {
 		if sessions, err := s.iCloudSessionsLocked(); err == nil && len(sessions) > 0 {
 			byAccount := make(map[string]domain.ICloudSession, len(sessions))
@@ -337,7 +347,6 @@ func (s *Store) Accounts(provider string) []domain.AppleAccount {
 	if wanted == "" || wanted == domain.ProviderGoogle {
 		s.applyGoogleStatusLocked(filtered)
 	}
-	return filtered
 }
 
 func (s *Store) microsoftSessionsLocked() ([]domain.MicrosoftSession, error) {

@@ -1133,6 +1133,32 @@ textarea.field {
   width: 52px;
 }
 
+/* 勾选列：批量同步 / 批量入池作用在勾中的母号上。
+   刻意做成独立一列，而不是塞进「邮箱」单元格里——那个单元格里的按钮是
+   width:100% 的 flex，塞进去会把勾选框挤到按钮下面去。 */
+.apple-col-check {
+  width: 44px;
+}
+
+.apple-account-table th.apple-check-cell,
+.apple-account-table td.apple-check-cell {
+  padding: 0 4px 0 14px;
+  text-align: center;
+}
+
+.apple-check-cell input {
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+  accent-color: var(--app-primary);
+  cursor: pointer;
+}
+
+.apple-check-cell input:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
 .apple-account-select {
   width: 100%;
   min-width: 0;

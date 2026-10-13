@@ -1,12 +1,13 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { AlertCircle, ChevronRight, Globe, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Save, Server, Tag, Trash2, X } from '@lucide/vue'
+import { AlertCircle, ChevronRight, Globe, Inbox, KeyRound, Layers, LoaderCircle, Mail, MailOpen, Plus, RefreshCw, Save, Search, Server, Tag, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import { useConfirm } from '../composables/useConfirm'
 import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
 import AccountInboxPanel from '../components/AccountInboxPanel.vue'
+import ListPager from '../components/ListPager.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,6 +18,14 @@ const showGenerate = ref(false)
 const showAddMailbox = ref(false)
 const data = ref({ items: [], module: {}, module_ready: true })
 const selected = ref(null)
+// 列表分页：账号会越加越多，一次全渲染到页面上既慢又重，所以只取当前这一页。
+// 搜索和分页一起存在才有用：只有分页时找一条记录要点几十次「下一页」，
+// 只有搜索时一次匹配几百条又会把体积问题原样搬回来。
+const page = ref(1)
+const query = ref('')
+const total = ref(0)
+const totalPages = ref(1)
+let searchTimer
 const session = ref({})
 const aliases = ref([])
 const aliasNotice = ref('')
@@ -112,11 +121,19 @@ async function load(options = {}) {
   const silent = Boolean(options.silent)
   if (!silent) loading.value = true
   try {
-    data.value = await api('/api/google-accounts')
+    const params = new URLSearchParams({ page: String(page.value) })
+    if (query.value.trim()) params.set('q', query.value.trim())
+    const payload = await api(`/api/google-accounts?${params.toString()}`)
+    data.value = payload
+    total.value = payload.total || 0
+    totalPages.value = payload.total_pages || 1
+    page.value = payload.page || 1
     await loadGoogleStatus()
     if (selected.value) {
-      const current = (data.value.items || []).find((item) => item.id === selected.value.id)
+      const current = (payload.items || []).find((item) => item.id === selected.value.id)
       if (current) selected.value = { ...selected.value, ...current }
+      // 翻页或搜索之后选中项可能已经不在当前页上。不清掉的话右侧会显示一个列表里
+      // 根本看不到的账号，看起来像它被删了。
       else {
         selected.value = null
         session.value = {}
@@ -128,6 +145,11 @@ async function load(options = {}) {
   } finally {
     if (!silent) loading.value = false
   }
+}
+
+function changePage(target) {
+  page.value = target
+  load()
 }
 
 // 凭据表单只在首次加载和保存之后回填。load() 会被实时事件触发，每次都回填
@@ -420,6 +442,16 @@ async function addMailbox() {
   }
 }
 
+// 搜索防抖：每敲一个字就发一次请求既浪费，也会让列表在打字时不停闪。
+// 搜索时回到第一页——停在第五页搜一个只有两条结果的词，会看到空列表。
+watch(query, () => {
+  window.clearTimeout(searchTimer)
+  searchTimer = window.setTimeout(() => {
+    page.value = 1
+    load()
+  }, 300)
+})
+
 onMounted(async () => {
   await load()
   await consumeCallbackQuery()
@@ -428,6 +460,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.clearTimeout(realtimeRefreshTimer)
+  window.clearTimeout(searchTimer)
   realtimeUnsubscribe()
 })
 </script>
@@ -499,8 +532,8 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Google 账号</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>账号与授权</h3><p>选择账号后可在右侧查看 OAuth2 授权与地址</p></div><span>{{ data.items?.length || 0 }} 个账号</span></header>
-          <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>还没有 Google 账号</strong><small>点击“添加 Google 账号”，在浏览器中完成 Google 授权。</small></div>
+          <header class="apple-section-heading"><div><h3>账号与授权</h3><p>选择账号后可在右侧查看 OAuth2 授权与地址</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
+          <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Google 账号' : '还没有 Google 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Google 账号”，在浏览器中完成 Google 授权。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
@@ -515,6 +548,7 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </div>
+          <ListPager :page="page" :total-pages="totalPages" :total="total" unit="个账号" :loading="loading" @change="changePage" />
         </section>
 
         <aside class="apple-detail-panel">

@@ -176,6 +176,32 @@ func (s *Service) Accounts() []AccountSummary {
 	return out
 }
 
+// AccountsPage 返回一页 Apple 账号，各自带上登录态。
+//
+// 选页放在存储层，不在 Go 里读全表再切片。登录态按当前页的账号现查——它不属于
+// 账号本身，而是会话表里的东西，所以分页不会把它落下。
+// 排序保持升序（最早的在上），与整表那条路一致。
+func (s *Service) AccountsPage(query string, page, pageSize int) domain.Page[AccountSummary] {
+	accounts := s.store.AccountsPage(domain.ProviderICloud, "", query, page, pageSize, true)
+	sessions := s.store.ICloudSessions()
+	byAccount := make(map[string]domain.ICloudSession, len(sessions))
+	for _, session := range sessions {
+		byAccount[session.AccountID] = session
+	}
+	items := make([]AccountSummary, 0, len(accounts.Items))
+	for _, account := range accounts.Items {
+		summary := AccountSummary{AppleAccount: account, LoginStates: []LoginStateSummary{}}
+		if session, ok := byAccount[account.ID]; ok {
+			summary.LoginStates = publicLoginStates(session)
+		}
+		items = append(items, summary)
+	}
+	return domain.Page[AccountSummary]{
+		Items: items, Page: accounts.Page, PageSize: accounts.PageSize,
+		Total: accounts.Total, TotalPages: accounts.TotalPages,
+	}
+}
+
 func (s *Service) Account(accountID string) (AccountSummary, error) {
 	account, ok := s.store.FindAppleAccount(accountID)
 	if !ok {
