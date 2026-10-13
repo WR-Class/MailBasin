@@ -255,7 +255,10 @@ function Invoke-Rollback {
       return 'unconfirmed'
     }
     Write-Log ("没有装上任何东西，服务全程没停过，仍在运行：{0}" -f $live)
-    $script:RolledBack = $true
+    # rolled_back 保持 false：这个字段的意思是「是否执行过回滚」，而这里什么都没装上去、
+    # 也就没有东西需要回滚。人看的那句话已经准确了，但字段是给后来的人和程序读的，
+    # 不能在记录里说一件没发生的事。
+    $script:RolledBack = $false
     return 'untouched'
   }
 
@@ -371,6 +374,21 @@ function Invoke-UpdateTask {
   Remove-Item -Force $OldExe -ErrorAction SilentlyContinue
 
   Write-Log ("更新完成：{0} -> {1}" -f $script:FromCommit, $live)
+
+  # 收尾清理：只在自己成功之后跑。这一点是有意的——刚刚做出来的那个备份是本次回滚的退路，
+  # 如果清理跑在前面，它就有可能把自己刚需要的东西删掉。清理失败不算更新失败：
+  # 更新已经成功了，不该因为扫尾没做成而报一个假失败。
+  try {
+    $maintenance = Join-Path $PSScriptRoot 'update-maintenance.ps1'
+    if (Test-Path $maintenance) {
+      $cleanup = Invoke-Native -FilePath 'powershell.exe' -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $maintenance)
+      foreach ($line in $cleanup.Output) { if ($line) { Write-Log ("清理：{0}" -f $line) } }
+      if ($cleanup.Code -ne 0) { Write-Log ("清理没有正常结束（退出码 {0}），不影响本次更新" -f $cleanup.Code) }
+    }
+  } catch {
+    Write-Log ("清理失败（不影响本次更新）：{0}" -f $_.Exception.Message)
+  }
+
   Write-Status -Step 'done' -State 'done' -Message ("已更新到 {0}" -f $live.Substring(0, 12))
 }
 
