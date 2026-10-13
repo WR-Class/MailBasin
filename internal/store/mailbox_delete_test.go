@@ -13,6 +13,8 @@ func TestDeleteMailboxMessagesClearsOnlyTargetMailbox(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建临时状态失败：%v", err)
 	}
+	// 见 mailbox_test.go 的 TestSetMailboxStatusHandlesOptionalNote：关库要排在删目录之前。
+	t.Cleanup(func() { _ = state.Close() })
 	target, _, err := state.UpsertMailboxFromRemote("account_fixture", domain.RemoteMailbox{
 		Email:    "delete-target@icloud.com",
 		Label:    "delete_target",

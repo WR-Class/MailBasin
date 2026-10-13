@@ -229,6 +229,10 @@ func newDeleteServiceFixture(t *testing.T) (*store.Store, domain.Mailbox) {
 	if err != nil {
 		t.Fatalf("创建临时状态失败：%v", err)
 	}
+	// 关库必须排在删目录之前：t.Cleanup 后进先出，而 t.TempDir() 在上面那句里已经注册了
+	// 「删掉这个目录」。不关库的话，Windows 删不掉还被句柄占着的 app.db，整包会因为这个
+	// 清理错误变红——那不是断言失败，是句柄泄漏。
+	t.Cleanup(func() { _ = state.Close() })
 	session, err := state.SaveICloudSession(domain.ICloudSession{
 		AppleID: "delete-fixture@icloud.com",
 		DSID:    "fixture-dsid",

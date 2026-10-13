@@ -32,6 +32,8 @@ func TestAPIResponsesDisableCaching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建测试状态失败：%v", err)
 	}
+	// 见 newMailboxLeaseTestServer 上的注释：关库要排在 t.TempDir 的删目录之前。
+	t.Cleanup(func() { _ = state.Close() })
 	server := New(config.Default(), state, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
@@ -170,6 +172,9 @@ func TestMailWatcherSettingTakesEffectWithoutRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建测试状态失败：%v", err)
 	}
+	// 关库注册在 t.Cleanup(cancel) 之前，于是后进先出的执行顺序是「先 cancel 停掉后台
+	// 监听、再关库」；反过来会在监听还在跑的时候把库关掉。删目录排在最后。
+	t.Cleanup(func() { _ = state.Close() })
 	cfg := config.Default()
 	server := New(cfg, state, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,6 +228,8 @@ func newKeepAliveTestState(t *testing.T, lastCheckOK bool, lastCheckedAt time.Ti
 	if err != nil {
 		t.Fatalf("创建测试状态失败：%v", err)
 	}
+	// 见 newMailboxLeaseTestServer 上的注释：关库要排在 t.TempDir 的删目录之前。
+	t.Cleanup(func() { _ = state.Close() })
 	settings := state.Settings()
 	settings.EnableAppleKeepAlive = true
 	if _, err := state.SaveSettings(settings); err != nil {

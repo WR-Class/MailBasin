@@ -14,6 +14,9 @@ func TestSetMailboxStatusHandlesOptionalNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建临时状态失败：%v", err)
 	}
+	// 关库必须排在删目录之前：t.Cleanup 后进先出，而 t.TempDir() 在上面那一句里
+	// 就已经注册了「删掉这个目录」。不关库的话，Windows 删不掉还被句柄占着的 app.db。
+	t.Cleanup(func() { _ = state.Close() })
 	mailbox, _, err := state.UpsertMailboxFromRemote("account_fixture", domain.RemoteMailbox{
 		Email: "fixture@icloud.com",
 		Label: "x_1",
@@ -204,6 +207,8 @@ func newLeaseTestStore(t *testing.T) (*Store, domain.Mailbox) {
 	if err != nil {
 		t.Fatalf("创建临时状态失败：%v", err)
 	}
+	// 见 TestSetMailboxStatusHandlesOptionalNote 上的注释：关库要排在删目录之前。
+	t.Cleanup(func() { _ = state.Close() })
 	mailbox, _, err := state.UpsertMailboxFromRemote("account_fixture", domain.RemoteMailbox{
 		Email:    "lease-fixture@icloud.com",
 		Label:    "lease_1",

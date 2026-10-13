@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,12 +31,19 @@ func TestSQLiteInitializesEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取数据库权限失败：%v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows 通过 ACL（继承自所在目录）表达文件访问权限，os.Chmod 只能切换只读位，
+	// 所以读回来的模式位永远是 666。这条断言在 POSIX 上照旧生效，在 Windows 上没有
+	// 可断言的东西——这不是产品缺陷，但也不该把整条检查删掉。
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("数据库权限为 %o，期望 600", info.Mode().Perm())
 	}
+	// 密钥文件是否存在，在每个平台上都成立，所以拆出来单独断言。
 	keyInfo, err := os.Stat(path + ".key")
-	if err != nil || keyInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("数据库密钥权限不正确：info=%v err=%v", keyInfo, err)
+	if err != nil {
+		t.Fatalf("读取数据库密钥失败：%v", err)
+	}
+	if runtime.GOOS != "windows" && keyInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("数据库密钥权限为 %o，期望 600", keyInfo.Mode().Perm())
 	}
 }
 

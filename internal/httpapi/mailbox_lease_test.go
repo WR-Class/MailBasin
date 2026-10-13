@@ -122,6 +122,10 @@ func newMailboxLeaseTestServer(t *testing.T) (*Server, *store.Store) {
 	if err != nil {
 		t.Fatalf("创建测试状态失败：%v", err)
 	}
+	// 关库必须排在删目录之前：t.Cleanup 是后进先出，而 t.TempDir() 在上面那一句里
+	// 就已经注册了「删掉这个目录」。不关库的话，Windows 删不掉还被句柄占着的 app.db，
+	// 整个包会因为 t.TempDir 的清理错误变红——那不是断言失败，是句柄泄漏。
+	t.Cleanup(func() { _ = state.Close() })
 	settings := state.Settings()
 	settings.EnablePublicMailboxAPI = true
 	settings.PublicAPIKey = "lease-test-key"
