@@ -1334,6 +1334,40 @@ func (s *Service) syncIMAPGroupNow(ctx context.Context, mailboxes []domain.Mailb
 	return accountResult, nil
 }
 
+// syncExternalGroupNow 处理外部取码邮箱：没有母号、也没有登录态，凭据是每个邮箱
+// 自己的取码地址，由 SyncExternalMailbox 按 ID 重读。
+//
+// 这类邮箱的 account_id 都是空串，所以「某邮箱所属的主号」在它们这里等于「全部
+// 外部取码邮箱」——在邮箱池里点其中任一个的同步，会把这几个一起要一遍码。对取码
+// 邮箱而言这没有副作用：接口返回的是当前那一个码，重复问一次不会多出一条记录。
+func (s *Service) syncExternalGroupNow(ctx context.Context, mailboxes []domain.Mailbox, accountResult AccountMessageSyncResult) (AccountMessageSyncResult, error) {
+	accountResult.Method = "external"
+	stored := 0
+	var failures []string
+	for _, mailbox := range mailboxes {
+		if err := ctx.Err(); err != nil {
+			return accountResult, err
+		}
+		count, err := s.SyncExternalMailbox(ctx, mailbox.ID)
+		if err != nil {
+			code, message, _ := protocol.ErrorDetails(err)
+			failures = append(failures, mailbox.Email+"（"+firstNonEmpty(code, message)+"）")
+			continue
+		}
+		stored += count
+	}
+	accountResult.SyncedMessages += stored
+	accountResult.Scanned += stored
+	if len(failures) == len(mailboxes) && len(mailboxes) > 0 {
+		// 全部失败多半是取码地址或令牌的问题，如实报出来，而不是留个「同步完成 0」。
+		return accountResult, errors.New("全部地址同步失败：" + strings.Join(failures, "，"))
+	}
+	if len(failures) > 0 {
+		accountResult.FallbackReason = "部分地址同步失败：" + strings.Join(failures, "，")
+	}
+	return accountResult, nil
+}
+
 func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, options MessageSyncOptions) (AccountMessageSyncResult, error) {
 	refreshed := make([]domain.Mailbox, 0, len(mailboxes))
 	for _, mailbox := range mailboxes {
@@ -1350,6 +1384,17 @@ func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, 
 	if account, found := s.store.FindAppleAccount(accountID); found {
 		accountName = firstNonEmpty(account.Label, account.AppleID, accountID)
 		provider = account.ProviderOrDefault()
+	} else {
+		// 没有母号行的邮箱：外部取码邮箱就是这样，导入时 account_id 留空、也不建母号。
+		// 服务商只能从邮箱自己身上读。少了这一步它会停在上面的默认值 icloud，
+		// 于是掉进 iCloud 那条路报「对应 Apple 账号登录态不存在」——而它根本没有
+		// Apple 账号。默认值在这里不是「不知道」，是「当成 iCloud」，而 iCloud
+		// 恰恰是唯一需要母号登录态的那一个。
+		provider = refreshed[0].ProviderOrDefault()
+		// 没有母号，就没有一个「账号名」可用。拿其中一个成员的名字顶上去，会让报告
+		// 看起来像只同步了那一个（实际这一组会一起同步），而且 store 的返回顺序不保证，
+		// 同一个操作两次点出来的名字还可能不一样。直接说明这是整组。
+		accountName = fmt.Sprintf("无母号邮箱组（%d 个）", len(refreshed))
 	}
 	accountResult := AccountMessageSyncResult{AccountID: accountID, Account: accountName, Mailboxes: len(refreshed)}
 	// Microsoft 账号走 Graph 读信，与 iCloud 的 IMAP/Web 双路径完全分离。
@@ -1366,6 +1411,12 @@ func (s *Service) syncGroupNow(ctx context.Context, mailboxes []domain.Mailbox, 
 	// 这个邮箱却根本没有 Apple 账号，于是使用者只能干看着一个查不出原因的失败。
 	if provider == domain.ProviderIMAP {
 		return s.syncIMAPGroupNow(ctx, refreshed, accountResult)
+	}
+	// 外部取码邮箱没有母号，也没有登录态：凭据是每个邮箱自己的取码地址，
+	// 由 SyncExternalMailbox 按 ID 重读。少了这条分支它同样会掉到下面的
+	// iCloud 路径，报出和 IMAP 一模一样的「对应 Apple 账号登录态不存在」。
+	if provider == domain.ProviderExternal {
+		return s.syncExternalGroupNow(ctx, refreshed, accountResult)
 	}
 	session, ok := s.store.ICloudSessionByAccountID(accountID)
 	if !ok {
@@ -1744,8 +1795,19 @@ func (s *Service) findCode(mailbox domain.Mailbox, query CodeQuery) (CodeResult,
 	if keyword == "" {
 		keyword = "OpenAI"
 	}
+	// 外部取码邮箱和别的邮箱不是一回事：它的「正文」是取码接口已经抽好的那串验证码，
+	// 不是邮件原文。所以下面按「收件箱里堆积邮件」定下的三条规则要整体让开：
+	//
+	//   1. 不再用面向正文的提取器重抽一次。那个提取器只认 6 位是刻意的（邮件里的
+	//      年份、订单号、金额都会变成假码），而这边的码可以是 4 位——重抽一次等于
+	//      把接口已经给出的答案丢掉，而且丢得没有任何痕迹：接口 200，界面说没收到。
+	//   2. 不受新鲜度窗口约束。这个箱的码是接口推过来的当前值，不是按时间堆积的
+	//      历史；几小时前取到的那个码，只要接口还在提供它，它就还是当前的码。
+	//   3. 不跳过已经发过的那个码。堆邮件那套要的是「每次给一个不同的码」，这里
+	//      只有一个「当前值」；接口没换码时说「暂未收到验证码」是假话。
+	external := mailbox.ProviderOrDefault() == domain.ProviderExternal
 	skipMessageID := strings.TrimSpace(query.SkipMessageID)
-	if query.IncludeServed {
+	if query.IncludeServed || external {
 		skipMessageID = ""
 	}
 	after := query.After
@@ -1760,7 +1822,9 @@ func (s *Service) findCode(mailbox domain.Mailbox, query CodeQuery) (CodeResult,
 			}
 		}
 	}
-	after = codeAfter(after, time.Now())
+	if !external {
+		after = codeAfter(after, time.Now())
+	}
 	for _, message := range s.store.MessagesForMailbox(mailbox.ID) {
 		messageTime := message.ReceivedAt
 		if messageTime.IsZero() {
@@ -1776,7 +1840,12 @@ func (s *Service) findCode(mailbox domain.Mailbox, query CodeQuery) (CodeResult,
 		if skipMessageID != "" && message.ID == skipMessageID {
 			continue
 		}
-		code := protocol.ExtractOTP(message.Subject + "\n" + message.Body)
+		// 外部取码邮箱的正文就是接口交出来的那串码，原样采信；其余服务商的正文是
+		// 邮件原文，才需要从里面把 6 位码认出来。
+		code := strings.TrimSpace(message.Body)
+		if !external {
+			code = protocol.ExtractOTP(message.Subject + "\n" + message.Body)
+		}
 		if code == "" {
 			continue
 		}

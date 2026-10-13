@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"icloud-privacy-mail-v2/internal/config"
 	"icloud-privacy-mail-v2/internal/domain"
+	"icloud-privacy-mail-v2/internal/store"
 )
 
 func newExternalFixture(t *testing.T) *Service {
@@ -448,5 +450,145 @@ func TestSyncExternalMailboxRejectsNonExternalProvider(t *testing.T) {
 	mailbox, _ := state.FindMailboxByEmail("g@gmail.com")
 	if _, err := service.SyncExternalMailbox(context.Background(), mailbox.ID); err == nil {
 		t.Fatal("非外部邮箱应被拒绝")
+	}
+}
+
+// 下面四条各自会单独失败，故意不合并成一条「能取到码」的测试——那样会盖掉三条。
+// 它们对应使用者报的同一件事（取码取不到，但详情里能看到码）底下的四条独立规则。
+
+// 接口交出来的码可以是 4 位。它已经抽好了，不该再拿只认 6 位的正文提取器重抽一次：
+// 重抽的结果是空，而空码被静默跳过——接口 200、库里明明有那条记录，取码却说没收到。
+func TestExternalCodeMailboxReturnsAFourDigitCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+			"email": "four@icloud.com", "code": "5863", "subject": "验证码", "message_id": "m-4",
+		}})
+	}))
+	defer server.Close()
+
+	service := newExternalFixture(t)
+	if _, err := service.ImportExternalMailboxes([]ExternalMailboxInput{
+		{Email: "four@icloud.com", CodeAPIURL: server.URL + "/code"},
+	}); err != nil {
+		t.Fatalf("导入失败：%v", err)
+	}
+	mailbox, _ := service.store.FindMailboxByEmail("four@icloud.com")
+
+	result, err := service.Code(context.Background(), mailbox.ID, time.Time{}, "", false)
+	if err != nil {
+		t.Fatalf("四位码也应取到：%v", err)
+	}
+	if result.Code != "5863" {
+		t.Fatalf("应原样返回接口给的 5863，实际 %q", result.Code)
+	}
+}
+
+// 这个箱的码是接口推过来的「当前值」，不是收件箱里按时间堆积的历史。几小时前取到的
+// 那个码，只要接口还在提供它，它就还是当前的码，不该被 5 分钟新鲜度窗口滤掉。
+// 这里刻意用 6 位码：这样失败的只可能是窗口，不是上一条的位数问题。
+func TestExternalCodeMailboxReturnsACodeOlderThanTheFreshWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "code": "no_code", "message": "暂未收到验证码", "retryable": true})
+	}))
+	defer server.Close()
+
+	service := newExternalFixture(t)
+	if _, err := service.ImportExternalMailboxes([]ExternalMailboxInput{
+		{Email: "old@icloud.com", CodeAPIURL: server.URL + "/code"},
+	}); err != nil {
+		t.Fatalf("导入失败：%v", err)
+	}
+	mailbox, _ := service.store.FindMailboxByEmail("old@icloud.com")
+
+	if _, err := service.store.ApplyMailboxSyncBatch([]store.MailboxSyncUpdate{{MailboxID: mailbox.ID, Messages: []store.MailboxSyncMessage{{
+		RemoteID: "external:778899", Source: "external_code_api", Subject: "外部取码接口",
+		From: "external-code-api", Body: "778899", ReceivedAt: time.Now().Add(-6 * time.Hour),
+	}}}}); err != nil {
+		t.Fatalf("写入测试记录失败：%v", err)
+	}
+
+	result, found, err := service.CachedCodeWithQuery(mailbox.ID, CodeQuery{})
+	if err != nil {
+		t.Fatalf("查询验证码失败：%v", err)
+	}
+	if !found {
+		t.Fatal("超过新鲜度窗口的码也应被返回，实际没找到")
+	}
+	if result.Code != "778899" {
+		t.Fatalf("应返回 778899，实际 %q", result.Code)
+	}
+}
+
+// 这个箱只有一个「当前值」，没有「下一个码」：接口没换码时，重复取码应该拿到同一个码，
+// 而不是「暂未收到验证码」。堆邮件那套「一个码只发一次」的语义在这里是错的答案。
+// 邮件型邮箱那一侧的契约由 TestCachedCodeOnlyReturnsMessagesAfterLastServedMessage 守着。
+func TestExternalCodeMailboxServesTheSameCodeAgain(t *testing.T) {
+	const body = "445566"
+	service := newExternalFixture(t)
+	if _, err := service.ImportExternalMailboxes([]ExternalMailboxInput{
+		{Email: "again@icloud.com", CodeAPIURL: "https://host/access/T/mailboxes/again@icloud.com/code"},
+	}); err != nil {
+		t.Fatalf("导入失败：%v", err)
+	}
+	mailbox, _ := service.store.FindMailboxByEmail("again@icloud.com")
+
+	if _, err := service.store.ApplyMailboxSyncBatch([]store.MailboxSyncUpdate{{MailboxID: mailbox.ID, Messages: []store.MailboxSyncMessage{{
+		RemoteID: "external:" + body, Source: "external_code_api", Subject: "外部取码接口",
+		From: "external-code-api", Body: body, ReceivedAt: time.Now(),
+	}}}}); err != nil {
+		t.Fatalf("写入测试记录失败：%v", err)
+	}
+
+	first, found, err := service.CachedCodeWithQuery(mailbox.ID, CodeQuery{MarkAsServed: true})
+	if err != nil || !found || first.Code != body {
+		t.Fatalf("首次取码结果不正确：found=%t result=%+v err=%v", found, first, err)
+	}
+	updated, _ := service.store.FindMailboxByID(mailbox.ID)
+	if updated.LastCodeMessageID == "" {
+		t.Fatal("首次取码应记下已发出去的那一条，否则这条测试没有测到该测的东西")
+	}
+
+	second, found, err := service.CachedCodeWithQuery(mailbox.ID, CodeQuery{SkipMessageID: updated.LastCodeMessageID, MarkAsServed: true})
+	if err != nil {
+		t.Fatalf("再次取码失败：%v", err)
+	}
+	if !found || second.Code != body {
+		t.Fatalf("接口没换码时应重复返回同一个当前值：found=%t result=%+v err=%v", found, second, err)
+	}
+}
+
+// 外部取码邮箱没有母号（account_id 是空串）、也没有 Apple 登录态。修复前它在分组同步里
+// 掉进 iCloud 那条路，报「对应 Apple 账号登录态不存在」——把使用者指向一个根本不存在的
+// Apple 账号去重新登录。断言的是「走没走对路」，不是「连没连上」。
+func TestExternalMailboxSyncDoesNotClaimAnAppleSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "code": "no_code", "message": "暂未收到验证码", "retryable": true})
+	}))
+	defer server.Close()
+
+	service := newExternalFixture(t)
+	if _, err := service.ImportExternalMailboxes([]ExternalMailboxInput{
+		{Email: "bare@icloud.com", CodeAPIURL: server.URL + "/code"},
+	}); err != nil {
+		t.Fatalf("导入失败：%v", err)
+	}
+	mailbox, _ := service.store.FindMailboxByEmail("bare@icloud.com")
+
+	result, err := service.SyncMailboxMessages(context.Background(), mailbox.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "对应 Apple 账号登录态不存在") {
+			t.Fatalf("外部取码邮箱同步不该报 Apple 账号登录态不存在：%v", err)
+		}
+		t.Fatalf("接口只是没有码，同步应成功：%v", err)
+	}
+	if len(result.Accounts) == 0 {
+		t.Fatal("同步结果里应有一条账号级记录")
+	}
+	if result.Accounts[0].Method != "external" {
+		t.Fatalf("应走 external 那条路，实际 %q", result.Accounts[0].Method)
+	}
+	// 这一组没有母号，拿某个成员的名字当账号名会让人以为只同步了那一个。
+	if !strings.Contains(result.Accounts[0].Account, "无母号邮箱组") {
+		t.Fatalf("账号名应说明这是整组，实际 %q", result.Accounts[0].Account)
 	}
 }
