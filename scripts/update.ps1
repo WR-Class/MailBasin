@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   MailBasin 一键更新：从仓库取到目标版本 → 本机构建 → 替换可执行文件 → 重启 → 验证 → 失败回滚。
 
@@ -71,7 +71,25 @@ $Exe        = Join-Path $RepoRoot 'bin\ipm-server.exe'
 $NewExe     = Join-Path $RepoRoot 'bin\ipm-server.exe.new'
 $OldExe     = Join-Path $RepoRoot 'bin\ipm-server.exe.old'
 $BackupDir  = Join-Path $RepoRoot 'bin\backup'
-$RunDir     = Join-Path $RepoRoot 'data\run'
+# 运行目录必须和服务读的是同一个。服务侧从配置推：filepath.Dir(cfg.DataPath)/run
+# （internal/httpapi/update.go:53），也就是配置文件里 data_path 所在目录下的 run/。
+# 这里以前写死成 data\run，只要有人把 data_path 指到别处，两边就分家——更新器写状态
+# 写进一棵树，服务读另一棵，界面永远停在旧进度。现在按服务的规矩来推，配置读不出来
+# 才回落到默认的 data\app.db。
+$DataPath   = 'data\app.db'
+$ConfigFile = Join-Path $RepoRoot 'config.json'
+if (Test-Path -LiteralPath $ConfigFile) {
+  try {
+    $Configured = (Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json).data_path
+    if ($Configured -and ([string]$Configured).Trim()) { $DataPath = ([string]$Configured).Trim() }
+  } catch {
+    Write-Log ("config.json 读不出来，按默认 data\app.db 推运行目录：{0}" -f $_.Exception.Message)
+  }
+}
+$DataRelative = Split-Path -Parent $DataPath
+if ([System.IO.Path]::IsPathRooted($DataRelative)) { $DataDir = $DataRelative }
+else { $DataDir = Join-Path $RepoRoot $DataRelative }
+$RunDir     = Join-Path $DataDir 'run'
 $StatusFile = Join-Path $RunDir 'update-status.json'
 $UpdateLog  = Join-Path $RunDir 'update.log'
 $BuildLog   = Join-Path $RunDir 'update-build.log'
