@@ -204,3 +204,50 @@ func TestProbeMailboxesLeavesHandSetStatusAlone(t *testing.T) {
 		t.Fatal("它确实读不了，这一点仍要如实报出")
 	}
 }
+
+// 同一个错误码会因为「可重试」标记不同而意思完全相反，判定必须看那个标记。
+//
+// 这条测试补的是上一版漏掉的维度：上一版的对照臂用的是另一个码 imap_dial_failed，
+// 而真正会出事的场合是同一个码 imap_login_failed——「登录请求失败」（网络）和
+// 「登录被拒」（凭据错）共用它。只变错误码、不变标记的对照臂，恰好绕开了这个缺陷。
+func TestProbeMailboxesJudgesByRetryableFlagNotOnlyByCode(t *testing.T) {
+	cases := []struct {
+		name      string
+		code      string
+		retryable bool
+		wantOut   bool // 是否应被摘出池子
+	}{
+		{"登录被拒（不可重试）该摘", "imap_login_failed", false, true},
+		{"登录请求失败（可重试）不该摘", "imap_login_failed", true, false},
+		{"连接失败（可重试）不该摘", "imap_dial_failed", true, false},
+		{"欢迎信息失败（可重试）不该摘", "imap_greeting_failed", true, false},
+		{"打开收件箱失败（可重试）不该摘", "imap_select_failed", true, false},
+		{"缺授权码（不可重试）该摘", "imap_secret_missing", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newIMAPFixture(t)
+			service.imapInspect = func(context.Context, string, int, string, string) (protocol.GenericIMAPStat, error) {
+				return protocol.GenericIMAPStat{}, protocol.NewCodedError(tc.code, "模拟失败", tc.retryable)
+			}
+			mailbox := seedIMAPMailbox(t, service, "case@example.com", "secret")
+
+			report := service.ProbeMailboxes(context.Background(), []string{mailbox.ID})
+			item := report.Items[0]
+			if item.Demoted != tc.wantOut {
+				t.Fatalf("码=%s 可重试=%v：摘除应为 %v，实际 %+v", tc.code, tc.retryable, tc.wantOut, item)
+			}
+			// 标记本身也要如实报出来，否则界面无法解释「为什么这一次没有动它」。
+			if item.Retryable != tc.retryable {
+				t.Fatalf("报告里应带上可重试标记 %v，实际 %+v", tc.retryable, item)
+			}
+			want := domain.StatusAvailable
+			if tc.wantOut {
+				want = domain.StatusFailed
+			}
+			if stored, _ := service.store.FindMailboxByID(mailbox.ID); stored.Status != want {
+				t.Fatalf("记录状态应为 %q，实际 %q", want, stored.Status)
+			}
+		})
+	}
+}

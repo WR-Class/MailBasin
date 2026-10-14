@@ -38,6 +38,10 @@ type MailboxProbeItem struct {
 
 	Code   string `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Retryable 是服务商自己对这次失败的定性：真表示「可以重试」，也就是网络类或对面
+	// 临时故障，不代表凭据有问题。判定该不该摘出池子必须看它，不能只看错误码——
+	// imap_login_failed 一个码同时表示「登录请求失败」和「登录被拒」，只靠码分不开。
+	Retryable bool `json:"retryable,omitempty"`
 
 	// RemoteExists 是服务器说收件箱里有几封；LocalReceived 是本地记录里读进来过几封。
 	// 两个数对不上，说明问题在读信路径上，而不在投递上。
@@ -193,7 +197,7 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox) M
 	// 两条限制都必要：只有凭据被明确拒绝才算（见 probeCredentialRejected），而且只动
 	// 仍然标着可用的那些——手设过的状态和出借中的邮箱都不该被一次体检改写（改状态会
 	// 顺带释放租约，那等于把邮箱从正在用它的任务手里拽走）。
-	if mailbox.Status == domain.StatusAvailable && probeCredentialRejected(item.Code) {
+	if mailbox.Status == domain.StatusAvailable && probeCredentialRejected(item) {
 		note := "体检判定读不了：" + firstNonEmpty(item.Reason, item.Code)
 		if updated, err := s.store.SetMailboxStatus(mailbox.ID, nil, nil, domain.StatusFailed, &note); err != nil {
 			item.Reason += "；但把它标为失败没有成功：" + err.Error()
@@ -206,14 +210,27 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox) M
 	return item
 }
 
-// probeCredentialRejected 判断这次失败是不是「凭据或连接配置被明确拒绝或缺失」。
+// probeCredentialRejected 判断这次失败是不是「凭据或连接配置被明确拒绝或缺失」，
+// 也就是唯一足以把邮箱摘出池子的那一类失败。
 //
-// 只有这几类才足以把邮箱摘出池子。拨号失败、超时、问候失败、选箱失败都可能是网络抖动
-// 或对面限流，拿它们下架等于用一次抖动摘掉一个本来能用的邮箱——那比漏报一个坏邮箱糟得多：
-// 坏邮箱只是白等一个验证码，被摘掉的好邮箱是连等都等不到。
-func probeCredentialRejected(code string) bool {
-	switch code {
-	case "imap_login_failed", "imap_username_missing", "imap_secret_missing", "imap_credentials_missing",
+// 判定要两个条件同时成立，缺一不可：
+//
+//  1. 错误码在下面这张表里。只有这些码代表「凭据或配置本身不对」。
+//  2. 这次失败不可重试。同名的码会出现在两种意思相反的场合：imap_login_failed
+//     既表示「登录请求本身失败」（网络断了，可重试），也表示「登录被拒」（凭据真错，
+//     不可重试），两者只靠这个标记区分。只按码判断会把一次网络断线当成凭据失效，
+//     把本来能用的邮箱摘出池子。
+//
+// 摘错的代价远大于漏报：坏邮箱只是白等一个验证码，被摘掉的好邮箱连等都等不到。
+func probeCredentialRejected(item MailboxProbeItem) bool {
+	if item.Retryable {
+		return false
+	}
+	switch item.Code {
+	case "imap_login_failed", "imap_username_missing", "imap_secret_missing", "imap_host_missing",
+		// 本地缺主机或授权码时探针自己填的码，协议层没有这一个；
+		// 它没有可重试标记，落在不可重试一侧是刻意的。
+		"imap_credentials_missing",
 		"external_code_unauthorized", "external_code_url_missing", "external_code_url_invalid":
 		return true
 	}
@@ -259,10 +276,11 @@ func (s *Service) probeIMAPMailbox(ctx context.Context, mailbox domain.Mailbox, 
 	defer cancel()
 	stat, err := inspect(probeCtx, host, mailbox.IMAPPort, username, secret)
 	if err != nil {
-		code, message, _ := protocol.ErrorDetails(err)
+		code, message, retryable := protocol.ErrorDetails(err)
 		item.Readable = false
 		item.Code = firstNonEmpty(code, "imap_probe_failed")
 		item.Reason = message
+		item.Retryable = retryable
 		return
 	}
 	item.Readable = true
@@ -291,10 +309,11 @@ func (s *Service) probeExternalMailbox(ctx context.Context, mailbox domain.Mailb
 	client := protocol.NewHTTPClient(s.cfg.GoogleProxy, mailboxProbeTimeout)
 	result, err := protocol.FetchExternalCode(probeCtx, client, endpoint)
 	if err != nil {
-		code, message, _ := protocol.ErrorDetails(err)
+		code, message, retryable := protocol.ErrorDetails(err)
 		item.Readable = false
 		item.Code = firstNonEmpty(code, "external_probe_failed")
 		item.Reason = message
+		item.Retryable = retryable
 		return
 	}
 	item.Readable = true
