@@ -101,16 +101,35 @@ func dialGenericIMAPTLS(ctx context.Context, host string, port int) (net.Conn, e
 	return conn, nil
 }
 
+// GenericIMAPStat 是打开收件箱后从服务器读到的规模。
+//
+// 这两个数只描述服务器那一侧，和本地记录里存了什么无关——正因为无关，
+// 把它们和本地记录一比，就能看出「收件箱里明明有信，却一封都没读进来」。
+type GenericIMAPStat struct {
+	Exists  int
+	UIDNext int
+}
+
 // VerifyGenericIMAP 连一次服务器并完成登录 + 打开收件箱，用来在导入时判断凭据是否可用。
 //
 // 只做「能不能读信」这一件事：不发信、不改动任何邮件，连上后直接退出。
 func VerifyGenericIMAP(ctx context.Context, host string, port int, username, secret string) error {
+	_, err := InspectGenericIMAP(ctx, host, port, username, secret)
+	return err
+}
+
+// InspectGenericIMAP 做和 VerifyGenericIMAP 完全相同的一次连接，区别只在返回值：
+// 那个回答「能不能读」，这个还把收件箱的规模一起带回来。
+//
+// 拆开的理由：「登录不了」和「登录得了、但收件箱是空的」在只看错误码时长得一模一样，
+// 而这两件事要修的地方完全不同。探活本身仍然只读——不发信、不取正文、不改任何标记。
+func InspectGenericIMAP(ctx context.Context, host string, port int, username, secret string) (GenericIMAPStat, error) {
 	username, secret = strings.TrimSpace(username), strings.TrimSpace(secret)
 	if username == "" {
-		return errCode("imap_username_missing", "缺少 IMAP 账号名", false)
+		return GenericIMAPStat{}, errCode("imap_username_missing", "缺少 IMAP 账号名", false)
 	}
 	if secret == "" {
-		return errCode("imap_secret_missing", "缺少客户端授权码", false)
+		return GenericIMAPStat{}, errCode("imap_secret_missing", "缺少客户端授权码", false)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -120,7 +139,7 @@ func VerifyGenericIMAP(ctx context.Context, host string, port int, username, sec
 
 	conn, err := dialGenericIMAPTLS(ctx, host, port)
 	if err != nil {
-		return err
+		return GenericIMAPStat{}, err
 	}
 	defer conn.Close()
 	// ctx 到点时主动断连，让阻塞中的读写立即返回，而不是干等 TCP 超时。
@@ -140,27 +159,60 @@ func VerifyGenericIMAP(ctx context.Context, host string, port int, username, sec
 	reader := bufio.NewReader(conn)
 	greeting, err := reader.ReadString('\n')
 	if err != nil {
-		return errCode("imap_greeting_failed", "读取 IMAP 欢迎信息失败："+err.Error(), true)
+		return GenericIMAPStat{}, errCode("imap_greeting_failed", "读取 IMAP 欢迎信息失败："+err.Error(), true)
 	}
 	if !strings.Contains(strings.ToUpper(greeting), "OK") {
-		return errCode("imap_greeting_failed", "IMAP 服务器未就绪："+imapResponseSummary([]string{greeting}), true)
+		return GenericIMAPStat{}, errCode("imap_greeting_failed", "IMAP 服务器未就绪："+imapResponseSummary([]string{greeting}), true)
 	}
 	loginLines, err := imapCommand(conn, reader, "A001", "LOGIN "+imapQuote(username)+" "+imapQuote(secret))
 	if err != nil {
-		return errCode("imap_login_failed", "IMAP 登录请求失败："+err.Error(), true)
+		return GenericIMAPStat{}, errCode("imap_login_failed", "IMAP 登录请求失败："+err.Error(), true)
 	}
 	if !imapTaggedOK(loginLines, "A001") {
-		return errCode("imap_login_failed", "IMAP 登录失败，请确认账号名填的是完整邮箱地址、密码填的是客户端授权码："+imapResponseSummary(loginLines), false)
+		return GenericIMAPStat{}, errCode("imap_login_failed", "IMAP 登录失败，请确认账号名填的是完整邮箱地址、密码填的是客户端授权码："+imapResponseSummary(loginLines), false)
 	}
 	selectLines, err := imapCommand(conn, reader, "A002", "SELECT INBOX")
 	if err != nil {
-		return errCode("imap_select_failed", "打开收件箱失败："+err.Error(), true)
+		return GenericIMAPStat{}, errCode("imap_select_failed", "打开收件箱失败："+err.Error(), true)
 	}
 	if !imapTaggedOK(selectLines, "A002") {
-		return errCode("imap_select_failed", "打开收件箱失败："+imapResponseSummary(selectLines), true)
+		return GenericIMAPStat{}, errCode("imap_select_failed", "打开收件箱失败："+imapResponseSummary(selectLines), true)
 	}
+	stat := parseIMAPSelectStat(selectLines)
 	_, _ = imapCommand(conn, reader, "A003", "LOGOUT")
-	return nil
+	return stat, nil
+}
+
+// parseIMAPSelectStat 从 SELECT 的响应里读出 EXISTS 和 UIDNEXT。
+//
+// 两种写法都要认：「* 8 EXISTS」和「* OK [UIDNEXT 472] ...」。读不到就留 0，
+// 不报错——服务器少给一行不该让整次探活失败，而 0 在结果里就是个诚实的「不知道」。
+func parseIMAPSelectStat(lines []string) GenericIMAPStat {
+	var stat GenericIMAPStat
+	for _, line := range lines {
+		upper := strings.ToUpper(line)
+		fields := strings.Fields(upper)
+		if len(fields) >= 2 && fields[len(fields)-1] == "EXISTS" {
+			if value, err := strconv.Atoi(fields[len(fields)-2]); err == nil {
+				stat.Exists = value
+			}
+			continue
+		}
+		index := strings.Index(upper, "[UIDNEXT")
+		if index < 0 {
+			continue
+		}
+		// 方括号里的那个数才是 UID；方括号外的（响应行号、OK 之类）都不是。
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(upper[index+len("[UIDNEXT"):]), "]"))
+		tokens := strings.Fields(rest)
+		if len(tokens) == 0 {
+			continue
+		}
+		if value, err := strconv.Atoi(strings.TrimRight(tokens[0], "]")); err == nil {
+			stat.UIDNext = value
+		}
+	}
+	return stat
 }
 
 // IMAPHostIsICloud 判断一个 IMAP 主机是不是 iCloud 自己的。

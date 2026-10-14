@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Boxes, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Clipboard, CloudDownload, CloudOff, FileUp, KeyRound, LoaderCircle, MailOpen, MailPlus, RefreshCw, Save, Search, ShieldX, Trash2, X } from '@lucide/vue'
+import { Boxes, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Clipboard, CloudDownload, CloudOff, FileUp, KeyRound, LoaderCircle, MailOpen, MailPlus, RefreshCw, Save, Search, ShieldCheck, ShieldX, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import CardSelect from '../components/CardSelect.vue'
 import FormDialog from '../components/FormDialog.vue'
@@ -50,6 +50,8 @@ const remoteClean = reactive({ move_synced: true, empty_trash: true })
 const appleMailCleanup = ref({ running: false, status: 'idle', total_accounts: 0, total_mailboxes: 0, completed_mailboxes: 0, successful_mailboxes: 0, failed_mailboxes: 0, queued: 0, active: 0, completed: 0, success: 0, failed: 0 })
 const existingMailboxMessageSync = ref({ running: false, status: 'idle', total_accounts: 0, total_mailboxes: 0, queued: 0, active: 0, completed_accounts: 0, successful_accounts: 0, failed_accounts: 0, imap_accounts: 0, web_api_accounts: 0, fallbacks: 0, scanned: 0, matched: 0, synced_messages: 0 })
 const mailboxImport = reactive({ account_id: '', email: '', label: '', note: '' })
+// 邮箱体检：逐批只读扫描全池，给出一张「哪些邮箱已经读不了信」的表。
+const healthCheck = ref({ running: false, done: 0, total: 0, report: null })
 const syncAccountID = ref('')
 const mailboxCommandBar = ref(null)
 const mailboxTableViewport = ref(null)
@@ -1153,6 +1155,71 @@ async function syncExistingMailboxMessages() {
   }
 }
 
+// 体检池里的每个邮箱还能不能读信。只读：不发信、不取邮件正文、不改任何设置，
+// 所以可以随时反复跑。
+//
+// 全池逐个连服务器，几十个邮箱要跑上一两分钟，所以按小批循环发请求——和「同步已有邮箱」
+// 同一个约定：一个长请求会被浏览器掐断，而且这期间界面上什么都看不到。分批之后每一批
+// 的进度都能立刻显示出来。
+async function runMailboxHealthCheck() {
+  if (!startBusy('health-check')) return
+  healthCheck.value = { running: true, done: 0, total: 0, report: null }
+  try {
+    // 范围是整个邮箱池，不只是当前这一页：只体检看得见的几条，等于把「看不见的那些
+    // 已经坏了」一直藏下去。
+    const ids = []
+    for (let pageIndex = 1; ; pageIndex += 1) {
+      const data = await api(`/api/mailboxes?page=${pageIndex}&page_size=200`)
+      ids.push(...(data.items || []).map((item) => item.id))
+      if (pageIndex >= (data.total_pages || 1)) break
+    }
+    if (!ids.length) {
+      healthCheck.value = { running: false, done: 0, total: 0, report: null }
+      flash('邮箱池里还没有邮箱', true)
+      return
+    }
+    healthCheck.value = { running: true, done: 0, total: ids.length, report: null }
+    const items = []
+    for (let start = 0; start < ids.length; start += 20) {
+      const batch = ids.slice(start, start + 20)
+      const data = await api('/api/mailboxes/probe-batch', { method: 'POST', body: JSON.stringify({ ids: batch }) })
+      items.push(...(data.items || []))
+      healthCheck.value = { ...healthCheck.value, done: items.length }
+    }
+    // 接口返回的每个计数都只覆盖它那一个小批，所以汇总必须在合并之后重算：
+    // 直接拿最后一批的数字当全池的数字，正是这类界面最容易说出口的一句假话。
+    const report = { items, checked: 0, readable: 0, unreadable: 0, not_covered: 0, missing: 0, never_checked: 0, unreadable_but_offered: 0 }
+    for (const item of items) {
+      if (item.missing) report.missing += 1
+      else if (!item.covered) report.not_covered += 1
+      else if (item.readable) { report.checked += 1; report.readable += 1 }
+      else { report.checked += 1; report.unreadable += 1 }
+      if (item.never_checked) report.never_checked += 1
+      if (item.offered_while_unreadable) report.unreadable_but_offered += 1
+    }
+    // 合并后重排：「读不了的排最前」这句话得对整张表成立，而不只是对每一批成立。
+    report.items = [...items].sort((a, b) => healthCheckRank(a) - healthCheckRank(b))
+    healthCheck.value = { running: false, done: ids.length, total: ids.length, report }
+    const offered = report.unreadable_but_offered
+    flash(offered ? `体检完成：${offered} 个邮箱读不了，却仍会被投放出去` : `体检完成：${report.readable} 个能读，没有发现读不了的`, Boolean(offered))
+  } catch (err) {
+    healthCheck.value = { running: false, done: 0, total: 0, report: null }
+    flash(`体检失败：${err.message}`, true)
+  } finally {
+    finishBusy('health-check')
+  }
+}
+
+function healthCheckRank(item) {
+  if (item.covered && !item.readable) return 0
+  if (item.missing || !item.covered) return 1
+  return 2
+}
+
+function closeHealthCheck() {
+  healthCheck.value = { running: false, done: 0, total: 0, report: null }
+}
+
 async function openMailbox(mailbox) {
   if (!startRowBusy(mailbox.id, 'detail')) return
   code.value = null
@@ -1664,12 +1731,40 @@ onBeforeUnmount(() => {
         <div class="mailbox-command-actions">
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing') || isBusy('sync-existing-messages') || existingMailboxMessageSync.running" @click="openSyncDialog"><LoaderCircle v-if="isBusy('sync-existing')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />{{ isBusy('sync-existing') ? '正在同步邮箱' : '同步已有邮箱' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('sync-existing-messages') || isBusy('sync-existing') || existingMailboxMessageSync.running" :title="mailboxMessageSyncBulkHint" @click="syncExistingMailboxMessages"><LoaderCircle v-if="isBusy('sync-existing-messages') || existingMailboxMessageSync.running" :size="14" class="animate-spin" /><MailOpen v-else :size="14" />{{ existingMailboxMessageSync.running ? `正在同步 ${existingMailboxMessageSync.completed_accounts || 0}/${existingMailboxMessageSync.total_accounts || 0}` : isBusy('sync-existing-messages') ? '正在启动同步' : '同步已有邮箱邮件' }}</button>
+          <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('health-check') || isBusy('sync-existing') || isBusy('sync-existing-messages')" title="逐个登录检查池里的邮箱还能不能读信。只读：不发信、不改任何设置" @click="runMailboxHealthCheck"><LoaderCircle v-if="isBusy('health-check')" :size="14" class="animate-spin" /><ShieldCheck v-else :size="14" />{{ isBusy('health-check') ? (healthCheck.total ? `正在体检 ${healthCheck.done}/${healthCheck.total}` : '正在体检') : '体检邮箱能否读取' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('import')" @click="openImportDialog"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><MailPlus v-else :size="14" />{{ isBusy('import') ? '正在导入邮箱' : '导入本地邮箱' }}</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('external-import')" title="导入没有母号、没有密码，只有取件接口的邮箱" @click="openExternalImportDialog"><LoaderCircle v-if="isBusy('external-import')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />导入外部取码邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" title="扫描并彻底删除全部 Apple 账号的云端和本地邮件" @click="cleanAllAppleMail"><LoaderCircle v-if="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />{{ isBusy('clean-summary') ? '正在统计邮件' : isBusy('clean-start') ? '正在启动清理' : appleMailCleanup.running ? `正在清理 ${appleMailCleanup.completed || 0}/${appleMailCleanup.total_accounts || 0}` : '全部彻底清理 Apple 邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="isBusy('bulk-delete-resolve')" title="按邮箱地址批量彻底删除 Apple 云端和本地邮箱" @click="openBulkDeleteDialog"><Trash2 :size="14" />批量删除指定邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="!selectedDeletableCount || deleteConfirmID === 'selected'" :title="selectedDeletableCount ? `彻底删除选中的 ${selectedDeletableCount} 个邮箱` : '请先选择未进入删除队列的邮箱'" @click="removeSelectedMailboxes"><LoaderCircle v-if="deleteConfirmID === 'selected'" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />删除选中{{ selectedDeletableCount ? `（${selectedDeletableCount}）` : '' }}</button>
         </div>
+      </div>
+      <div v-if="healthCheck.running || healthCheck.report" data-health-panel class="mx-3 mb-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800/60">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <ShieldCheck :size="14" class="shrink-0 text-sky-600 dark:text-sky-400" />
+          <template v-if="healthCheck.running">
+            <span class="font-medium">正在体检邮箱能否读取 {{ healthCheck.done }}/{{ healthCheck.total || '…' }}</span>
+            <span class="text-slate-500 dark:text-slate-400">只读检查：不发信、不改任何设置</span>
+          </template>
+          <template v-else>
+            <span class="font-medium">体检完成</span>
+            <span class="text-emerald-600 dark:text-emerald-400">能读 {{ healthCheck.report.readable }}</span>
+            <span :class="healthCheck.report.unreadable ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'">读不了 {{ healthCheck.report.unreadable }}</span>
+            <span v-if="healthCheck.report.never_checked" class="text-amber-600 dark:text-amber-400" title="从来没有被检查过的邮箱，收信数为 0 只代表不知道">从未检查过 {{ healthCheck.report.never_checked }}</span>
+            <span v-if="healthCheck.report.missing" class="text-slate-500 dark:text-slate-400">本地已无记录 {{ healthCheck.report.missing }}</span>
+            <span v-if="healthCheck.report.not_covered" class="text-slate-500 dark:text-slate-400" title="这些服务商走各自的授权接口读信，本次体检没有检查它们">本次未覆盖 {{ healthCheck.report.not_covered }}</span>
+            <span v-if="healthCheck.report.unreadable_but_offered" class="font-medium text-rose-600 dark:text-rose-400">其中 {{ healthCheck.report.unreadable_but_offered }} 个读不了却仍会被投放出去</span>
+          </template>
+          <button type="button" class="ml-auto secondary-button mailbox-command-button" :disabled="healthCheck.running" @click="closeHealthCheck">收起</button>
+        </div>
+        <ul v-if="healthCheck.report?.unreadable" class="mt-2 max-h-40 space-y-1 overflow-y-auto">
+          <li v-for="item in healthCheck.report.items.filter((row) => row.covered && !row.readable)" :key="item.id" class="flex flex-wrap items-baseline gap-x-2">
+            <span class="font-mono">{{ item.email }}</span>
+            <span class="text-slate-500 dark:text-slate-400">{{ item.reason || item.code }}</span>
+            <span v-if="item.offered_while_unreadable" class="rounded bg-rose-100 px-1.5 py-0.5 font-medium text-rose-700 dark:bg-rose-950/50 dark:text-rose-300">会被投放出去</span>
+            <span v-if="item.never_checked" class="rounded bg-amber-100 px-1.5 py-0.5 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">从未检查过</span>
+          </li>
+        </ul>
       </div>
       <div v-if="loadingVisible" class="mailbox-loading-mask"><div><LoaderCircle :size="16" class="animate-spin" />正在加载邮箱</div></div>
       <div ref="mailboxTableViewport" class="mailbox-table-viewport" :style="{ '--mailbox-table-height': `${mailboxTableHeight}px`, '--mailbox-empty-height': `${mailboxEmptyHeight}px` }">

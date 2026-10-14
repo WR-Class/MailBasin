@@ -38,6 +38,10 @@ type Service struct {
 	// imapProbe 是 IMAP 凭据探活的实现。留空时用真实的 protocol.VerifyGenericIMAP。
 	// 做成可替换的字段，是为了让导入路径的单元测试不必真的去拨号 QQ 的服务器。
 	imapProbe func(ctx context.Context, host string, port int, username, secret string) error
+	// imapInspect 是收件箱体检的实现。留空时用真实的 protocol.InspectGenericIMAP。
+	// 和 imapProbe 分开，是因为体检要的返回值更多（登录结论 + 收件箱规模），
+	// 而导入路径只关心能不能登录——把两者的签名混成一个会让导入也跟着变复杂。
+	imapInspect func(ctx context.Context, host string, port int, username, secret string) (protocol.GenericIMAPStat, error)
 }
 
 type remoteMailboxDeleteClient interface {

@@ -197,6 +197,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/mailboxes/sync-messages/status", s.protected(s.handleExistingMailboxMessagesSyncStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/sync-messages", s.protected(s.handleExistingMailboxMessagesSync))
 	s.mux.HandleFunc("POST /api/mailboxes/remote-clean", s.protected(s.handleMailboxesRemoteClean))
+	// 只读体检：批量回答「哪些邮箱还能登录读信」。放在 {id} 之前只是和其它静态路径排一起，
+	// 路由本身按具体程度取值，位置不影响匹配。
+	s.mux.HandleFunc("POST /api/mailboxes/probe-batch", s.protected(s.handleMailboxProbeBatch))
 	s.mux.HandleFunc("GET /api/mailboxes/{id}", s.protected(s.handleMailbox))
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/status", s.protected(s.handleMailboxStatus))
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/sync", s.protected(s.handleMailboxSync))

@@ -132,3 +132,47 @@ func TestDialGenericIMAPRejectsEmptyHost(t *testing.T) {
 		t.Fatalf("错误标识应为 imap_host_missing，实际 %q", code)
 	}
 }
+
+// 收件箱的规模藏在 SELECT 响应的两行里：一行是「* 8 EXISTS」，
+// 另一行是方括号里的「[UIDNEXT 472]」。读不出这两个数，「登录得了但收件箱是空的」
+// 和「登录得了、里面其实有信却一封没读进来」在结果里就长得一模一样。
+func TestParseIMAPSelectStatReadsExistsAndUIDNext(t *testing.T) {
+	stat := parseIMAPSelectStat([]string{
+		"* 8 EXISTS",
+		"* 0 RECENT",
+		"* OK [UNSEEN 3] Message 3 is first unseen",
+		"* OK [UIDVALIDITY 1234567890] UIDs valid",
+		"* OK [UIDNEXT 472] Predicted next UID",
+		"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)",
+		"A002 OK [READ-WRITE] Select completed",
+	})
+	if stat.Exists != 8 {
+		t.Fatalf("EXISTS 应读出 8，实际 %d", stat.Exists)
+	}
+	if stat.UIDNext != 472 {
+		t.Fatalf("UIDNEXT 应读出 472，实际 %d", stat.UIDNext)
+	}
+}
+
+// 对照臂：这两行缺席时必须读出 0，而不是读出一个写死的值。
+// 顺便钉住一个极易混淆的写法——方括号里是 UIDVALIDITY 时不能被当成 UIDNEXT，
+// 那个数（1234567890）长得也很像一个 UID，认错了会报出一个荒唐的 UIDNEXT。
+func TestParseIMAPSelectStatLeavesAbsentFieldsAtZero(t *testing.T) {
+	stat := parseIMAPSelectStat([]string{
+		"* OK [UIDVALIDITY 1234567890] UIDs valid",
+		"* 0 RECENT",
+		"A002 OK Select completed",
+	})
+	if stat.Exists != 0 || stat.UIDNext != 0 {
+		t.Fatalf("缺这两行时应读出 0/0，实际 %d/%d", stat.Exists, stat.UIDNext)
+	}
+}
+
+// 空响应既不该崩掉，也不该报错：服务器少给一行不该让整次探活失败。
+func TestParseIMAPSelectStatHandlesEmptyResponse(t *testing.T) {
+	for _, lines := range [][]string{nil, {}} {
+		if stat := parseIMAPSelectStat(lines); stat.Exists != 0 || stat.UIDNext != 0 {
+			t.Fatalf("空响应应读出 0/0，实际 %+v", stat)
+		}
+	}
+}
