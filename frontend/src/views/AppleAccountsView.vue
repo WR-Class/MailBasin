@@ -1,5 +1,5 @@
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Apple, CheckCircle2, ChevronRight, CloudDownload, Eye, EyeOff, KeyRound, LoaderCircle, Mail, MailPlus, Plus, RefreshCw, Search, Server, ShieldCheck, Trash2, X } from '@lucide/vue'
 import { api } from '../api/client'
 import CardSelect from '../components/CardSelect.vue'
@@ -69,6 +69,22 @@ function finishBusy(action) {
   if (!isBusy(action)) return
   busyActions.value = busyActions.value.filter((item) => item !== action)
 }
+
+// 状态筛选：筛的就是行上那个状态徽章的值（账号自己的状态），不额外取数。
+// 选项从已加载的行里归纳，所以分页时它只覆盖已加载的那部分——这一点照实写在控件提示里。
+const statusFilter = ref('')
+const statusOptions = computed(() => {
+  const seen = []
+  for (const account of data.value.items || []) {
+    const value = String(account.icloud_status || account.status || '').trim()
+    if (value && !seen.includes(value)) seen.push(value)
+  }
+  return seen
+})
+const filteredItems = computed(() => (data.value.items || []).filter((account) => {
+  if (!statusFilter.value) return true
+  return String(account.icloud_status || account.status || '').trim() === statusFilter.value
+}))
 
 function statusLabel(value) {
   return ({ active: '正常', partial: '部分正常', need_login: '需要登录', need_2fa: '等待 2FA', no_icloud_plus: '无 iCloud+', rate_limited: '访问受限', failed: '失败' })[value] || value || '未知'
@@ -393,14 +409,14 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载 Apple 账号</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选中一个后在它下方展开各通道状态与验证码</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><span>总 {{ total }} 个账号</span></header>
+          <header class="apple-section-heading"><div><h3>账号与登录态</h3><p>选中一个后在它下方展开各通道状态与验证码</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索账号或标签" aria-label="搜索账号或标签" /></label><label class="field-wrap" title="按行上那个状态徽章筛选；选项从已加载的行里归纳，分页时只覆盖已加载的部分"><select v-model="statusFilter" class="field" aria-label="按状态筛选"><option value="">全部状态</option><option v-for="value in statusOptions" :key="value" :value="value">{{ statusLabel(value) }}</option></select></label><span>{{ statusFilter ? `筛选出 ${filteredItems.length} / 总 ${total} 个账号` : `总 ${total} 个账号` }}</span></header>
           <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Apple 账号' : '还没有 Apple 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Apple 账号”完成首次协议登录。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
               <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
               <thead><tr><th>Apple 账号</th><th>状态</th><th>登录通道</th><th>操作</th></tr></thead>
               <tbody>
-                <template v-for="account in data.items" :key="account.id">
+                <template v-for="account in filteredItems" :key="account.id">
                 <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${account.label || account.apple_id || 'Apple 账号'} 的登录态详情`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
                   <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Apple v-else :size="14" /></span><span><strong>{{ account.label || account.apple_id || 'Apple 账号' }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
                   <td><span :class="accountStatusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
