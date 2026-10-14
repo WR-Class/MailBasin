@@ -172,9 +172,10 @@ textarea.field {
   padding-bottom: 9px;
 }
 
+/* 铺满内容区。这里原来有一道 1600px 的上限再加居中，窗口比它宽时整页两侧就空出一块——
+   操作者要的就是铺满，所以去掉上限；贴边问题交给内容区自己的内边距。 */
 .mailbox-page {
   width: 100%;
-  max-width: 1600px;
   margin: 0 auto;
 }
 
@@ -183,11 +184,15 @@ textarea.field {
   overflow: hidden;
 }
 
+/* 允许换行。右侧那排按钮声明为不收缩，一行放不下时（这台机器上 1600px 就放不下）被压扁的
+   是筛选那一侧，而不是按钮自己——所以让按钮换到下一行，谁也不挤谁。 */
 .mailbox-command-bar {
   min-height: 56px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 8px;
   gap: 10px;
   padding: 9px 14px;
   border-bottom: 1px solid var(--app-line);
@@ -203,7 +208,8 @@ textarea.field {
 }
 
 .mailbox-command-filters {
-  flex: 1 1 auto;
+  /* 基准宽度按三个筛选加起来给：空间不够时由按钮换行来吸收，而不是由筛选被压扁来吸收。 */
+  flex: 1 1 660px;
 }
 
 .mailbox-search {
@@ -217,16 +223,19 @@ textarea.field {
   font-size: 11px;
 }
 
-.mailbox-account-filter {
+/* 这两个下限必须比 .card-select 那条带 min-w-0 的规则权重更高：两者权重相同，而那条规则写在
+   文件更后面，靠顺序把这里的下限一并抹掉，于是空间不够时筛选被压成 0 宽、连「全部状态」都看不见。
+   所以用父容器限定权重，并且不参与收缩。 */
+.mailbox-command-filters .mailbox-account-filter {
   width: 230px;
   min-width: 180px;
-  flex: 0 1 230px;
+  flex: 0 0 auto;
 }
 
-.mailbox-status-filter {
-  width: 128px;
-  min-width: 112px;
-  flex: 0 1 128px;
+.mailbox-command-filters .mailbox-status-filter {
+  width: 132px;
+  min-width: 116px;
+  flex: 0 0 auto;
 }
 
 .mailbox-command-actions {
@@ -5046,9 +5055,9 @@ textarea.field {
     flex-direction: column;
   }
 
-  .mailbox-search,
-  .mailbox-account-filter,
-  .mailbox-status-filter {
+  .mailbox-command-filters .mailbox-search,
+  .mailbox-command-filters .mailbox-account-filter,
+  .mailbox-command-filters .mailbox-status-filter {
     width: 100%;
     min-width: 0;
     flex: 0 0 auto;
