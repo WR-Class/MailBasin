@@ -56,10 +56,13 @@ type MailboxProbeItem struct {
 
 	Status string `json:"status"`
 	InPool bool   `json:"in_pool"`
-	// OfferedWhileUnreadable：读不了，却仍标着可用、仍在池里。
-	// 邮箱池只从「可用且未隐藏」的记录里挑人，所以这一条会被真的投放出去，
-	// 然后永远等不到验证码——这是整张表里最该被看见的一行。
+	// OfferedWhileUnreadable：判读不了的那一刻，它仍标着可用、仍在池里。邮箱池只从
+	// 「可用且未隐藏」的记录里挑人，所以这些会被真的投放出去，然后永远等不到验证码。
 	OfferedWhileUnreadable bool `json:"offered_while_unreadable"`
+	// Demoted：本次已把它标成失败、从池里摘掉。PreviousStatus 是摘之前的状态，
+	// 需要人工恢复时照着改回去。
+	Demoted        bool   `json:"demoted"`
+	PreviousStatus string `json:"previous_status,omitempty"`
 }
 
 // MailboxProbeReport 汇总一次体检。
@@ -71,8 +74,10 @@ type MailboxProbeReport struct {
 	Missing      int `json:"missing"`
 	NeverChecked int `json:"never_checked"`
 	// UnreadableButOffered 是「读不了却仍会被投放」的个数，是可操作的那部分。
-	UnreadableButOffered int               `json:"unreadable_but_offered"`
-	Items                []MailboxProbeItem `json:"items"`
+	UnreadableButOffered int `json:"unreadable_but_offered"`
+	// Demoted 是本次已经摘掉的个数。它和上一行的差，就是「该摘却没摘成」的。
+	Demoted int                `json:"demoted"`
+	Items   []MailboxProbeItem `json:"items"`
 }
 
 // ProbeMailboxes 体检一批邮箱：能不能登录读信、服务器上到底有没有信。
@@ -143,6 +148,9 @@ func (s *Service) ProbeMailboxes(ctx context.Context, ids []string) MailboxProbe
 		if item.OfferedWhileUnreadable {
 			report.UnreadableButOffered++
 		}
+		if item.Demoted {
+			report.Demoted++
+		}
 	}
 	return report
 }
@@ -179,7 +187,37 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox) M
 	}
 	item.OfferedWhileUnreadable = item.Covered && !item.Readable &&
 		mailbox.Status == domain.StatusAvailable && !mailbox.PoolHidden
+	// 体检不能只出一份报告：报告没人看的时候，一个邮箱到底能不能用就没人知道。
+	// 所以判定之后顺手把读不了的从池里摘掉。
+	//
+	// 两条限制都必要：只有凭据被明确拒绝才算（见 probeCredentialRejected），而且只动
+	// 仍然标着可用的那些——手设过的状态和出借中的邮箱都不该被一次体检改写（改状态会
+	// 顺带释放租约，那等于把邮箱从正在用它的任务手里拽走）。
+	if mailbox.Status == domain.StatusAvailable && probeCredentialRejected(item.Code) {
+		note := "体检判定读不了：" + firstNonEmpty(item.Reason, item.Code)
+		if updated, err := s.store.SetMailboxStatus(mailbox.ID, nil, nil, domain.StatusFailed, &note); err != nil {
+			item.Reason += "；但把它标为失败没有成功：" + err.Error()
+		} else {
+			item.Demoted = true
+			item.PreviousStatus = mailbox.Status
+			item.Status = updated.Status
+		}
+	}
 	return item
+}
+
+// probeCredentialRejected 判断这次失败是不是「凭据或连接配置被明确拒绝或缺失」。
+//
+// 只有这几类才足以把邮箱摘出池子。拨号失败、超时、问候失败、选箱失败都可能是网络抖动
+// 或对面限流，拿它们下架等于用一次抖动摘掉一个本来能用的邮箱——那比漏报一个坏邮箱糟得多：
+// 坏邮箱只是白等一个验证码，被摘掉的好邮箱是连等都等不到。
+func probeCredentialRejected(code string) bool {
+	switch code {
+	case "imap_login_failed", "imap_username_missing", "imap_secret_missing", "imap_credentials_missing",
+		"external_code_unauthorized", "external_code_url_missing", "external_code_url_invalid":
+		return true
+	}
+	return false
 }
 
 // probeBaseItem 填本地记录里已有的那部分，不涉及任何网络。

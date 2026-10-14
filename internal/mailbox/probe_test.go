@@ -69,6 +69,23 @@ func TestProbeMailboxesSeparatesUnreadableFromEmpty(t *testing.T) {
 	if got := byEmail["full@example.com"]; !got.Readable || got.RemoteExists != 7 || !got.NeverChecked {
 		t.Fatalf("能登录且有 7 封应如实报出并标出从未检查过，实际 %+v", got)
 	}
+	// 判定之后要顺手摘掉：报告没人看的时候，「能不能用」得从池子的状态上就看得出来。
+	if report.Demoted != 1 || !byEmail["broken@example.com"].Demoted {
+		t.Fatalf("登录被拒的那个应被摘掉，实际 %+v", report)
+	}
+	if got := byEmail["broken@example.com"]; got.PreviousStatus != domain.StatusAvailable {
+		t.Fatalf("应记下摘之前的状态，实际 %q", got.PreviousStatus)
+	}
+	// 摘掉要落到记录上，不只是写在报告里。
+	if stored, _ := service.store.FindMailboxByID(broken.ID); stored.Status != domain.StatusFailed {
+		t.Fatalf("记录里的状态应已改成失败，实际 %q", stored.Status)
+	}
+	// 没坏的一个都不许动。
+	for _, id := range []string{full.ID, empty.ID} {
+		if stored, _ := service.store.FindMailboxByID(id); stored.Status != domain.StatusAvailable {
+			t.Fatalf("%s 不该被改动，实际 %q", id, stored.Status)
+		}
+	}
 }
 
 // 探不到的服务商要如实标成未覆盖，不能混进「正常」里，也不能被打上一个没有根据的
@@ -90,6 +107,9 @@ func TestProbeMailboxesStaysHonestAboutCoverageAndOfferedDeadMailboxes(t *testin
 	}
 	if report.NotCovered != 2 || report.Missing != 1 || report.Checked != 1 {
 		t.Fatalf("两个非 IMAP 邮箱该报未覆盖、一个标识该报本地无记录，实际 %+v", report)
+	}
+	if report.Demoted != 1 {
+		t.Fatalf("登录被拒的那个应被摘掉，实际 %+v", report)
 	}
 	byID := map[string]MailboxProbeItem{}
 	for _, item := range report.Items {
@@ -136,5 +156,51 @@ func TestProbeMailboxesCoversExternalCodeMailboxes(t *testing.T) {
 	// 「还没有收到」，而使用者会去等一个永远不会来的码。
 	if item := report.Items[0]; !strings.Contains(item.Reason, "没有验证码") || !item.NeverChecked {
 		t.Fatalf("应如实写成「可达但没有验证码」，并标出从未检查过，实际 %+v", item)
+	}
+}
+
+// 对照臂：网络类失败一律不下架。拿一次拨号失败或超时下架，等于用一次网络抖动
+// 摘掉一个本来能用的邮箱——坏邮箱只是白等，被摘掉的好邮箱连等都等不到。
+func TestProbeMailboxesDoesNotDemoteOnTransientNetworkFailures(t *testing.T) {
+	service := newIMAPFixture(t)
+	service.imapInspect = func(context.Context, string, int, string, string) (protocol.GenericIMAPStat, error) {
+		return protocol.GenericIMAPStat{}, protocol.NewCodedError("imap_dial_failed", "连接邮件服务器失败", true)
+	}
+	mailbox := seedIMAPMailbox(t, service, "flaky@example.com", "secret")
+
+	report := service.ProbeMailboxes(context.Background(), []string{mailbox.ID})
+	if report.Demoted != 0 || report.Items[0].Demoted {
+		t.Fatalf("网络类失败不该下架，实际 %+v", report.Items[0])
+	}
+	// 但仍然要如实说它读不了、而且还在池里会被投放——不下架不等于不报告。
+	if report.Items[0].Readable || !report.Items[0].OfferedWhileUnreadable {
+		t.Fatalf("应如实报出读不了且仍会被投放，实际 %+v", report.Items[0])
+	}
+	if stored, _ := service.store.FindMailboxByID(mailbox.ID); stored.Status != domain.StatusAvailable {
+		t.Fatalf("状态不该被改动，实际 %q", stored.Status)
+	}
+}
+
+// 手设过的状态不该被一次体检改写：那可能是有人特意停用的，也可能是正在出借的。
+// 改状态会顺带释放租约，所以碰错了等于把邮箱从正在用它的任务手里拽走。
+func TestProbeMailboxesLeavesHandSetStatusAlone(t *testing.T) {
+	service := newIMAPFixture(t)
+	service.imapInspect = func(context.Context, string, int, string, string) (protocol.GenericIMAPStat, error) {
+		return protocol.GenericIMAPStat{}, protocol.NewCodedError("imap_login_failed", "IMAP 登录失败", false)
+	}
+	mailbox := seedIMAPMailbox(t, service, "paused@example.com", "stale-secret")
+	if _, err := service.store.SetMailboxStatus(mailbox.ID, nil, nil, domain.StatusDisabled, nil); err != nil {
+		t.Fatalf("先把它设成停用失败：%v", err)
+	}
+
+	report := service.ProbeMailboxes(context.Background(), []string{mailbox.ID})
+	if report.Demoted != 0 {
+		t.Fatalf("已经停用的邮箱不该被体检改写，实际 %+v", report.Items[0])
+	}
+	if stored, _ := service.store.FindMailboxByID(mailbox.ID); stored.Status != domain.StatusDisabled {
+		t.Fatalf("状态应仍是停用，实际 %q", stored.Status)
+	}
+	if report.Items[0].Readable {
+		t.Fatal("它确实读不了，这一点仍要如实报出")
 	}
 }
