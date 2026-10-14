@@ -802,9 +802,10 @@ textarea.field {
 .apple-account-page,
 .dashboard-page,
 .exports-page,
+/* 与邮箱池页统一：去掉这道上限。各页各自一道上限的结果就是页面之间一大一小，
+   在窗口里看起来是「这个铺满、那个居中」；要铺满就都铺满，呼吸交给内容区自己的内边距。 */
 .settings-page {
   width: 100%;
-  max-width: 1600px;
   margin: 0 auto;
 }
 
@@ -4270,9 +4271,9 @@ textarea.field {
 }
 
 /* 创建任务工作台：控制区、概览和日志合并为一张连续卡片。 */
+/* 同上：与其余各页统一宽度，不留这一道单独的上限。 */
 .task-page {
   width: 100%;
-  max-width: 1600px;
   margin: 0 auto;
 }
 
