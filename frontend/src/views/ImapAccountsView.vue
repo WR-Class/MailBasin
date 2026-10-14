@@ -48,7 +48,21 @@ let realtimeRefreshTimer
 let realtimeUnsubscribe = () => {}
 
 const moduleInfo = computed(() => data.value.module || {})
-const accounts = computed(() => data.value.items || [])
+// 状态筛选：筛的就是行上那个状态徽章的值（账号自己的状态），不额外取数。
+// 选项从已加载的行里归纳，所以分页时它只覆盖已加载的那部分——这一点照实写在控件提示里。
+const statusFilter = ref('')
+const statusOptions = computed(() => {
+  const seen = []
+  for (const account of data.value.items || []) {
+    const value = String(account.icloud_status || account.status || '').trim()
+    if (value && !seen.includes(value)) seen.push(value)
+  }
+  return seen
+})
+const accounts = computed(() => (data.value.items || []).filter((account) => {
+  if (!statusFilter.value) return true
+  return String(account.icloud_status || account.status || '').trim() === statusFilter.value
+}))
 
 function flash(text, isError = false) {
   if (isError) showError(text)
@@ -387,6 +401,41 @@ async function deleteAccount(account) {
   }
 }
 
+// 批量删除：逐个套用上面那一行自己那一步删除，每删一个报一次结果。
+// 与批量同步、批量入池不同，这里一个都不勾时按钮是禁用的——不可恢复的动作不做「不勾即全部」
+// 那种默认，一次误点就是整页消失。不能删的行由接口那一侧照旧拒绝，并在这里如实报出来。
+async function removeCheckedAccounts() {
+  const targets = accounts.value.filter((account) => checkedIDs.value.includes(account.id))
+  if (!targets.length) return
+  const addresses = targets.reduce((sum, account) => sum + (account.mailbox_count || 0), 0)
+  const ok = await confirmAction({
+    title: `删除 ${targets.length} 个${presetLabel.value}`,
+    message: `将逐个删除勾选的 ${targets.length} 个${presetLabel.value}，连同名下共 ${addresses} 个地址和已收邮件，且不可恢复。未勾选的不受影响。`,
+    confirmText: '删除',
+  })
+  if (!ok) return
+  let done = 0
+  const failures = []
+  for (const account of targets) {
+    const name = account.label || account.apple_id
+    if (!startBusy(`delete:${account.id}`)) continue
+    try {
+      const payload = await api(`/api/imap-accounts/${account.id}`, { method: 'DELETE' })
+      done += 1
+      checkedIDs.value = checkedIDs.value.filter((id) => id !== account.id)
+      flash(`已删除 ${name}；清理地址 ${payload.mailboxes || 0} 个，邮件 ${payload.messages || 0} 封`)
+    } catch (err) {
+      failures.push(`${name}：${err.message}`)
+    } finally {
+      finishBusy(`delete:${account.id}`)
+    }
+  }
+  if (selected.value && targets.some((account) => account.id === selected.value.id)) selected.value = null
+  await load()
+  if (failures.length) flash(`批量删除已结束：成功 ${done}｜失败 ${failures.length}；最近错误：${failures[failures.length - 1]}`, true)
+  else flash(`批量删除已结束：成功 ${done}`)
+}
+
 // 勾选：批量同步和批量入池作用在勾中的母号上；一个都没勾时按当前筛选条件的全部算。
 // 两种都要——挑几个处理，和「别再让我点 456 次」都是真实需求。
 const checkedIDs = ref([])
@@ -580,6 +629,7 @@ onBeforeUnmount(() => {
           <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('读一遍名下所有地址的收件箱')" @click="runBatchSync"><LoaderCircle v-if="batch.running && batch.label === '同步'" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />{{ batch.running && batch.label === '同步' ? `同步中 ${batch.done}/${batch.total}` : '批量同步' }}</button>
           <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('把名下所有地址加入邮箱池')" @click="runBatchPool(true)"><Inbox :size="14" />批量入池</button>
           <button class="secondary-button apple-command-button" :disabled="batch.running || (!checkedIDs.length && !total)" :title="batchScopeTitle('把名下所有地址移出邮箱池')" @click="runBatchPool(false)"><Inbox :size="14" />批量出池</button>
+          <button class="secondary-button apple-command-button" :disabled="batch.running || !checkedIDs.length" :title="checkedIDs.length ? `逐个删除勾选的 ${checkedIDs.length} 个母号：每个母号连同它名下的地址和已收邮件一起删除，且不可恢复` : '批量删除只作用在勾选的那些母号上：一个都不勾就不删。这是不可恢复的动作，不做「不勾即全部」'" @click="removeCheckedAccounts"><Trash2 :size="14" />批量删除{{ checkedIDs.length ? `（${checkedIDs.length}）` : '' }}</button>
         </div>
       </header>
 
@@ -587,7 +637,7 @@ onBeforeUnmount(() => {
         <LoaderCircle v-if="batch.running" :size="14" class="animate-spin" />
         <AlertCircle v-else :size="14" />
         <span v-if="batch.running">正在批量{{ batch.label }}：{{ batch.done }} / {{ batch.total }}<template v-if="batch.failed">，已失败 {{ batch.failed }}</template></span>
-        <span v-else>已勾选 {{ checkedIDs.length }} 个母号，批量操作只作用在它们身上；一个都不勾则按当前筛选下的全部 {{ total }} 个算。</span>
+        <span v-else>已勾选 {{ checkedIDs.length }} 个母号，批量操作只作用在它们身上；一个都不勾则按当前筛选下的全部 {{ total }} 个算——<strong>批量删除除外</strong>：它必须勾选，不勾就不删。</span>
         <button v-if="!batch.running" type="button" class="secondary-button apple-check-button" @click="checkedIDs = []">清除勾选</button>
       </div>
 
@@ -599,7 +649,7 @@ onBeforeUnmount(() => {
       <div v-if="loading" class="apple-loading"><LoaderCircle :size="16" class="animate-spin" />正在加载{{ presetLabel }}</div>
       <div v-else class="apple-account-body">
         <section class="apple-account-list">
-          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后在它下方展开授权、名下地址与取信信息</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱或标签" aria-label="搜索邮箱或标签" /></label><span>总 {{ total }} 个</span></header>
+          <header class="apple-section-heading"><div><h3>{{ presetLabel }}</h3><p>选中一个后在它下方展开授权、名下地址与取信信息</p></div><label class="field-wrap mailbox-search"><Search :size="15" class="field-icon" /><input v-model="query" class="field field-leading" type="search" placeholder="搜索邮箱或标签" aria-label="搜索邮箱或标签" /></label><label class="field-wrap" title="按行上那个状态徽章筛选；选项从已加载的行里归纳，分页时只覆盖已加载的部分"><select v-model="statusFilter" class="field" aria-label="按状态筛选"><option value="">全部状态</option><option v-for="value in statusOptions" :key="value" :value="value">{{ statusLabel(value) }}</option></select></label><span>{{ statusFilter ? `筛选出 ${accounts.length} / 总 ${total} 个` : `总 ${total} 个` }}</span></header>
           <div v-if="!accounts.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的' + presetLabel : '还没有 ' + presetLabel }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : `点击“添加${presetLabel}”，填入邮箱地址和客户端授权码。` }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
