@@ -42,6 +42,10 @@ type Service struct {
 	// 和 imapProbe 分开，是因为体检要的返回值更多（登录结论 + 收件箱规模），
 	// 而导入路径只关心能不能登录——把两者的签名混成一个会让导入也跟着变复杂。
 	imapInspect func(ctx context.Context, host string, port int, username, secret string) (protocol.GenericIMAPStat, error)
+	// accountChannelCheck 是母号读信通道的体检实现。留空时按服务商走真实实现：
+	// 微软和谷歌复用账号页上那一次检查，苹果走母号的 IMAP 取码登录。做成可替换的字段，
+	// 是为了让账号级分支的单元测试不必真的去换一次访问令牌。
+	accountChannelCheck func(ctx context.Context, provider, accountID string) probeAccountVerdict
 }
 
 type remoteMailboxDeleteClient interface {

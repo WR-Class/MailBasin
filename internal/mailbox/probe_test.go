@@ -124,8 +124,11 @@ func TestProbeMailboxesStaysHonestAboutCoverageAndOfferedDeadMailboxes(t *testin
 		t.Fatalf("不存在的标识应如实占一行，实际 %+v", got)
 	}
 	for _, item := range []MailboxProbeItem{byID[outlook.ID], byID[google.ID]} {
-		if item.Covered || item.Readable || item.OfferedWhileUnreadable || item.Code != "provider_not_covered" {
-			t.Fatalf("未覆盖的邮箱不该有任何判定，实际 %+v", item)
+		// 这两个没有关联母号，所以查不了。报的码从 provider_not_covered 换成了
+		// account_missing：微软和谷歌现在是被覆盖的（走母号那份授权），这两条只是缺母号，
+		// 那是一句更准的话。旧的码留着会把「我们查不了这条记录」说成「这类服务商我们不查」。
+		if item.Covered || item.Readable || item.OfferedWhileUnreadable || item.Code != "account_missing" {
+			t.Fatalf("没有母号的记录该报「缺母号、未覆盖」，实际 %+v", item)
 		}
 	}
 }
@@ -249,5 +252,175 @@ func TestProbeMailboxesJudgesByRetryableFlagNotOnlyByCode(t *testing.T) {
 				t.Fatalf("记录状态应为 %q，实际 %q", want, stored.Status)
 			}
 		})
+	}
+}
+
+// seedAccountMailbox 放一个挂在某个母号名下的地址。微软、谷歌、苹果这三家的地址都是
+// 这种形状：自己没有凭据，读信靠母号那一份授权。没有显式设过隐藏标记，所以它默认在池里
+// ——这正是需要被筛掉的那一类。
+func seedAccountMailbox(t *testing.T, service *Service, accountID, provider, email string) domain.Mailbox {
+	t.Helper()
+	mailbox, _, err := service.store.UpsertMailboxFromRemote(accountID, domain.RemoteMailbox{
+		Provider: provider, Email: email, Label: email, IsActive: true, Origin: provider,
+	}, "")
+	if err != nil {
+		t.Fatalf("放置 %s 邮箱失败：%v", provider, err)
+	}
+	return mailbox
+}
+
+// 母号的授权被明确拒绝时，名下每个还能投放的地址都要被摘出去；母号只是网络不通时，
+// 一个都不许动。这两支必须各有对照，否则「不误摘」只是一句话。
+func TestProbeMailboxesDemotesEveryAddressOfARejectedAccountOnly(t *testing.T) {
+	cases := []struct {
+		name    string
+		verdict probeAccountVerdict
+		wantOut int
+	}{
+		{
+			name: "母号授权被拒：名下两个地址都该摘",
+			verdict: probeAccountVerdict{
+				covered: true, code: "microsoft_token_rejected",
+				reason: "Microsoft 授权已被拒绝，请重新登录账号", retryable: false,
+			},
+			wantOut: 2,
+		},
+		{
+			name: "母号只是网络不通：一个都不该摘",
+			verdict: probeAccountVerdict{
+				covered: true, code: "microsoft_channel_unreachable",
+				reason: "读取账号资料失败（HTTP 503）", retryable: true,
+			},
+			wantOut: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newIMAPFixture(t)
+			service.accountChannelCheck = func(context.Context, string, string) probeAccountVerdict {
+				return tc.verdict
+			}
+			first := seedAccountMailbox(t, service, "acct-1", domain.ProviderMicrosoft, "one@outlook.com")
+			second := seedAccountMailbox(t, service, "acct-1", domain.ProviderMicrosoft, "two@outlook.com")
+
+			report := service.ProbeMailboxes(context.Background(), []string{first.ID, second.ID})
+			if report.Demoted != tc.wantOut {
+				t.Fatalf("摘除数应为 %d，实际 %d：%+v", tc.wantOut, report.Demoted, report.Items)
+			}
+			for _, item := range report.Items {
+				if item.Level != probeLevelAccount || item.AccountID != "acct-1" {
+					t.Fatalf("结论应标明来自哪个母号，实际 %+v", item)
+				}
+				// 界面上要能看出这一条不是按地址单独测出来的。
+				if !strings.Contains(item.Reason, "来自母号") {
+					t.Fatalf("原因里应说清结论来自母号，实际 %q", item.Reason)
+				}
+			}
+			want := domain.StatusAvailable
+			if tc.wantOut > 0 {
+				want = domain.StatusFailed
+			}
+			for _, mailbox := range []domain.Mailbox{first, second} {
+				if stored, _ := service.store.FindMailboxByID(mailbox.ID); stored.Status != want {
+					t.Fatalf("%s 的状态应为 %q，实际 %q", mailbox.Email, want, stored.Status)
+				}
+			}
+		})
+	}
+}
+
+// 同一个母号下的多个地址只该被查一次：五个别名查五遍，只是让对面多收四次同样的请求，
+// 还可能给出互相矛盾的结论——同一份授权不可能既是好的又是坏的。
+func TestProbeMailboxesChecksOneAccountOncePerBatch(t *testing.T) {
+	service := newIMAPFixture(t)
+	calls := 0
+	service.accountChannelCheck = func(context.Context, string, string) probeAccountVerdict {
+		calls++
+		return probeAccountVerdict{covered: true, readable: true, code: "google_channel_ok", reason: "母号授权可用"}
+	}
+	ids := make([]string, 0, 3)
+	for _, email := range []string{"a@example.com", "b@example.com", "c@example.com"} {
+		ids = append(ids, seedAccountMailbox(t, service, "acct-9", domain.ProviderGoogle, email).ID)
+	}
+
+	report := service.ProbeMailboxes(context.Background(), ids)
+	if calls != 1 {
+		t.Fatalf("同一个母号应只查一次，实际查了 %d 次", calls)
+	}
+	if report.Readable != 3 || report.Unreadable != 0 {
+		t.Fatalf("三个地址都该算能读，实际 %+v", report)
+	}
+}
+
+// 够不到的通道要报成「本次未覆盖」，不能报成「读不了」：只配了网页通道的苹果母号，
+// 名下地址照样能取到验证码，按读不了处理会白白摘掉好地址。
+func TestProbeMailboxesReportsAnUnreachableChannelAsNotCovered(t *testing.T) {
+	service := newIMAPFixture(t)
+	service.accountChannelCheck = func(context.Context, string, string) probeAccountVerdict {
+		return probeAccountVerdict{
+			covered: false, code: "icloud_imap_not_covered",
+			reason: "这个母号没有配 IMAP 取码通道",
+		}
+	}
+	mailbox := seedAccountMailbox(t, service, "acct-3", domain.ProviderICloud, "hidden@icloud.com")
+
+	report := service.ProbeMailboxes(context.Background(), []string{mailbox.ID})
+	if report.NotCovered != 1 || report.Unreadable != 0 || report.Demoted != 0 {
+		t.Fatalf("应记成 1 个未覆盖、0 个读不了、0 个摘除，实际 %+v", report)
+	}
+	if report.Items[0].Readable {
+		t.Fatal("够不到就不该说它能读")
+	}
+	if stored, _ := service.store.FindMailboxByID(mailbox.ID); stored.Status != domain.StatusAvailable {
+		t.Fatalf("够不到不该改状态，实际 %q", stored.Status)
+	}
+}
+
+// 三个服务商要各自走到自己那条通道上，不能都落到苹果那条。
+func TestProbeMailboxesRoutesEachProviderToItsOwnChannel(t *testing.T) {
+	service := newIMAPFixture(t)
+	seen := map[string]int{}
+	service.accountChannelCheck = func(_ context.Context, provider, accountID string) probeAccountVerdict {
+		seen[provider+"|"+accountID]++
+		return probeAccountVerdict{covered: true, readable: true, code: "channel_ok", reason: "正常"}
+	}
+	ids := []string{
+		seedAccountMailbox(t, service, "ms-1", domain.ProviderMicrosoft, "m@outlook.com").ID,
+		seedAccountMailbox(t, service, "gg-1", domain.ProviderGoogle, "g@gmail.com").ID,
+		seedAccountMailbox(t, service, "ap-1", domain.ProviderICloud, "a@icloud.com").ID,
+	}
+
+	service.ProbeMailboxes(context.Background(), ids)
+	for _, key := range []string{"microsoft|ms-1", "google|gg-1", "icloud|ap-1"} {
+		if seen[key] != 1 {
+			t.Fatalf("%s 应被查一次，实际 %d 次（全部：%v）", key, seen[key], seen)
+		}
+	}
+}
+
+// 记录没有关联母号时，如实说查不了，不替它下结论、也不去查通道、更不改状态。
+func TestProbeMailboxesSaysWhenThereIsNoParentAccount(t *testing.T) {
+	service := newIMAPFixture(t)
+	calls := 0
+	service.accountChannelCheck = func(context.Context, string, string) probeAccountVerdict {
+		calls++
+		return probeAccountVerdict{covered: true, readable: true, code: "channel_ok", reason: "正常"}
+	}
+	mailbox, _, err := service.store.UpsertMailboxFromRemote("", domain.RemoteMailbox{
+		Provider: domain.ProviderMicrosoft, Email: "orphan@outlook.com", IsActive: true, Origin: "microsoft",
+	}, "")
+	if err != nil {
+		t.Fatalf("放置邮箱失败：%v", err)
+	}
+
+	report := service.ProbeMailboxes(context.Background(), []string{mailbox.ID})
+	if calls != 0 {
+		t.Fatalf("没有母号就不该去查通道，实际查了 %d 次", calls)
+	}
+	if report.Items[0].Code != "account_missing" || report.Items[0].Covered {
+		t.Fatalf("应报成「没有母号、本次未覆盖」，实际 %+v", report.Items[0])
+	}
+	if report.Demoted != 0 {
+		t.Fatalf("没有母号不该改状态，实际摘了 %d 个", report.Demoted)
 	}
 }

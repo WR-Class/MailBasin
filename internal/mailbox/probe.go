@@ -30,6 +30,11 @@ type MailboxProbeItem struct {
 	Email    string `json:"email"`
 	Label    string `json:"label,omitempty"`
 	Provider string `json:"provider"`
+	// Level 是这条结论的分辨率：「按地址」还是「按账号」。微软、谷歌、苹果的地址共用
+	// 母号的一份授权，只有账号级的结论才成立；给它们按地址下结论，等于宣称一个机制上
+	// 不存在的精度，界面照着显示就会把一次母号故障说成五个地址各自的问题。
+	Level     string `json:"level,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
 
 	// Covered 表示这次真的探过它。未覆盖时 Readable 一律为 false，
 	// 并由 Reason 说明为什么没探——不用一个猜出来的结论把表格填满。
@@ -84,6 +89,54 @@ type MailboxProbeReport struct {
 	Items   []MailboxProbeItem `json:"items"`
 }
 
+// 结论的两种分辨率。
+const (
+	// probeLevelMailbox：结论只覆盖这一个地址（它自己有一份凭据）。
+	probeLevelMailbox = "mailbox"
+	// probeLevelAccount：结论覆盖母号名下所有地址（它们共用一份授权）。
+	probeLevelAccount = "account"
+)
+
+// probeAccountVerdict 是母号读信通道的结论。
+//
+// Covered 单独留着，是因为「通道被拒」和「这条通道不在本次检查范围内」必须分开：
+// 前者足以把地址摘出池子，后者只是够不到——苹果母号只配了网页通道时就属于后者，
+// 那时的地址照样能读到验证码，按前者处理会白白摘掉好地址。
+type probeAccountVerdict struct {
+	covered   bool
+	readable  bool
+	code      string
+	reason    string
+	retryable bool
+}
+
+// probeAccountVerdicts 在一次体检内缓存账号级结论。
+//
+// 微软、谷歌、苹果的地址共用母号的一份授权，所以同一个账号在一次体检里只该被真正检查
+// 一次：五个别名查五遍，只是让对面多收四次同样的请求，还可能给出互相矛盾的结论——
+// 同一份授权不可能既是好的又是坏的。所以这里连检查一起串行化，宁可慢一点也不自相矛盾。
+type probeAccountVerdicts struct {
+	mu       sync.Mutex
+	verdicts map[string]probeAccountVerdict
+}
+
+func newProbeAccountVerdicts() *probeAccountVerdicts {
+	return &probeAccountVerdicts{verdicts: map[string]probeAccountVerdict{}}
+}
+
+// verdictFor 取某个账号的结论，没有就现在查一次并记下来。
+// 持锁期间做检查是有意的：账号数远小于地址数，串行化换来的是一致。
+func (v *probeAccountVerdicts) verdictFor(key string, check func() probeAccountVerdict) probeAccountVerdict {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if cached, ok := v.verdicts[key]; ok {
+		return cached
+	}
+	verdict := check()
+	v.verdicts[key] = verdict
+	return verdict
+}
+
 // ProbeMailboxes 体检一批邮箱：能不能登录读信、服务器上到底有没有信。
 //
 // 这是只读诊断：不发信、不取正文、不改任何状态。所以它可以随时跑、反复跑，
@@ -107,6 +160,8 @@ func (s *Service) ProbeMailboxes(ctx context.Context, ids []string) MailboxProbe
 	// 使用者看到的行序才和它传进来的顺序对得上。
 	results := make([]MailboxProbeItem, len(requested))
 	slots := make(chan struct{}, mailboxProbeWorkers)
+	// 账号级结论在一次体检内共享：同一个母号下的多个地址只查一次。
+	verdicts := newProbeAccountVerdicts()
 	var pending sync.WaitGroup
 	for index, id := range requested {
 		mailbox, found := s.store.FindMailboxByID(id)
@@ -122,7 +177,7 @@ func (s *Service) ProbeMailboxes(ctx context.Context, ids []string) MailboxProbe
 			defer pending.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			results[index] = s.probeOneMailbox(ctx, mailbox)
+			results[index] = s.probeOneMailbox(ctx, mailbox, verdicts)
 		}(index, mailbox)
 	}
 	pending.Wait()
@@ -176,13 +231,15 @@ func mailboxProbeRank(item MailboxProbeItem) int {
 // 分派而不是写一条通用路径，是因为「读一封信」在不同服务商那里是三件不同的事：
 // IMAP 是登录加打开收件箱，外部取码邮箱是请求一个取件地址，其余走各自的授权接口。
 // 后一类这次够不到，就如实说没探到，不给一个看起来完整的结论。
-func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox) MailboxProbeItem {
+func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox, verdicts *probeAccountVerdicts) MailboxProbeItem {
 	item := probeBaseItem(mailbox)
 	switch mailbox.ProviderOrDefault() {
 	case domain.ProviderIMAP:
 		s.probeIMAPMailbox(ctx, mailbox, &item)
 	case domain.ProviderExternal:
 		s.probeExternalMailbox(ctx, mailbox, &item)
+	case domain.ProviderMicrosoft, domain.ProviderGoogle, domain.ProviderICloud:
+		s.probeAuthorizedAccount(ctx, mailbox, &item, verdicts)
 	default:
 		item.Covered = false
 		item.Readable = false
@@ -210,6 +267,123 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox) M
 	return item
 }
 
+// probeAuthorizedAccount 覆盖走授权接口读信的三家：微软、谷歌、苹果。
+//
+// 这三家的地址共用母号的一份授权，读信通道就是母号那次授权，所以结论只能是账号级的：
+// 母号读不了，名下每个地址一起读不了。判定直接复用账号页上那一次检查调用，不另写一条
+// 连接——另写一条等于检查了别的东西，结论再漂亮也说明不了这个产品真实的读信路径。
+func (s *Service) probeAuthorizedAccount(ctx context.Context, mailbox domain.Mailbox, item *MailboxProbeItem, verdicts *probeAccountVerdicts) {
+	provider := mailbox.ProviderOrDefault()
+	item.Level = probeLevelAccount
+	item.AccountID = mailbox.AccountID
+	if strings.TrimSpace(mailbox.AccountID) == "" {
+		// 没有母号可查。这不等于读不了：如实说这条查不了，不替它下结论。
+		item.Covered = false
+		item.Readable = false
+		item.Code = "account_missing"
+		item.Reason = "本地这条记录没有关联母号，查不了它的读信通道"
+		return
+	}
+	accountID := mailbox.AccountID
+	check := s.accountChannelCheck
+	if check == nil {
+		check = s.defaultAccountChannelCheck
+	}
+	verdict := verdicts.verdictFor(provider+"|"+accountID, func() probeAccountVerdict {
+		return check(ctx, provider, accountID)
+	})
+	item.Covered = verdict.covered
+	item.Readable = verdict.readable
+	item.Code = verdict.code
+	item.Reason = verdict.reason
+	if verdict.covered {
+		item.Reason += "（这条结论来自母号，名下地址共用这条读信通道）"
+	}
+	item.Retryable = verdict.retryable
+}
+
+// defaultAccountChannelCheck 按服务商走真实实现。
+func (s *Service) defaultAccountChannelCheck(ctx context.Context, provider, accountID string) probeAccountVerdict {
+	switch provider {
+	case domain.ProviderMicrosoft:
+		return s.probeMicrosoftChannel(ctx, accountID)
+	case domain.ProviderGoogle:
+		return s.probeGoogleChannel(ctx, accountID)
+	default:
+		return s.probeICloudChannel(ctx, accountID)
+	}
+}
+
+// probeMicrosoftChannel 复用微软账号页上的那次检查：取访问令牌并读一次账号资料。
+func (s *Service) probeMicrosoftChannel(ctx context.Context, accountID string) probeAccountVerdict {
+	probeCtx, cancel := context.WithTimeout(ctx, mailboxProbeTimeout)
+	defer cancel()
+	if _, err := s.CheckMicrosoftAccount(probeCtx, accountID); err != nil {
+		code, message, retryable := protocol.ErrorDetails(err)
+		return probeAccountVerdict{
+			covered: true, code: firstNonEmpty(code, "microsoft_check_failed"),
+			reason: message, retryable: retryable,
+		}
+	}
+	return probeAccountVerdict{
+		covered: true, readable: true, code: "microsoft_channel_ok",
+		reason: "母号授权可用，读账号资料正常",
+	}
+}
+
+// probeGoogleChannel 复用谷歌账号页上的那次检查：取访问令牌并读一次账号资料。
+func (s *Service) probeGoogleChannel(ctx context.Context, accountID string) probeAccountVerdict {
+	probeCtx, cancel := context.WithTimeout(ctx, mailboxProbeTimeout)
+	defer cancel()
+	if _, err := s.CheckGoogleAccount(probeCtx, accountID); err != nil {
+		code, message, retryable := protocol.ErrorDetails(err)
+		return probeAccountVerdict{
+			covered: true, code: firstNonEmpty(code, "google_check_failed"),
+			reason: message, retryable: retryable,
+		}
+	}
+	return probeAccountVerdict{
+		covered: true, readable: true, code: "google_channel_ok",
+		reason: "母号授权可用，读账号资料正常",
+	}
+}
+
+// probeICloudChannel 检查苹果母号的 IMAP 取码登录。
+//
+// 苹果隐私地址的验证码是母号读回来的，所以能读信的前提是母号的取码通道能用。这里只覆盖
+// IMAP 取码这一条：iCloud 网页那条通道的校验在苹果服务里，邮箱服务够不到它。够不到的
+// 部分如实标成「本次未覆盖」而不是「读不了」——只配了网页通道的母号，名下地址照样能取到
+// 验证码，按「读不了」处理会白白摘掉好地址。
+func (s *Service) probeICloudChannel(ctx context.Context, accountID string) probeAccountVerdict {
+	session, ok := s.store.ICloudSessionByAccountID(accountID)
+	if !ok {
+		return probeAccountVerdict{
+			covered: true, code: "icloud_session_missing",
+			reason: "本地没有这个母号的登录态，读信通道查不了",
+		}
+	}
+	state, ok := protocol.LoginStateForKind(session, domain.LoginStateICloudIMAP)
+	if !ok {
+		return probeAccountVerdict{
+			covered: false, code: "icloud_imap_not_covered",
+			reason: "这个母号没有配 IMAP 取码通道；iCloud 网页那条通道不在本次检查范围内",
+		}
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, mailboxProbeTimeout)
+	defer cancel()
+	if err := protocol.CheckICloudIMAPLogin(probeCtx, state.IMAPEmail, state.IMAPAppPassword); err != nil {
+		code, message, retryable := protocol.ErrorDetails(err)
+		return probeAccountVerdict{
+			covered: true, code: firstNonEmpty(code, "icloud_imap_check_failed"),
+			reason: message, retryable: retryable,
+		}
+	}
+	return probeAccountVerdict{
+		covered: true, readable: true, code: "icloud_imap_ok",
+		reason: "母号的 IMAP 取码登录正常",
+	}
+}
+
 // probeCredentialRejected 判断这次失败是不是「凭据或连接配置被明确拒绝或缺失」，
 // 也就是唯一足以把邮箱摘出池子的那一类失败。
 //
@@ -233,6 +407,15 @@ func probeCredentialRejected(item MailboxProbeItem) bool {
 		"imap_credentials_missing",
 		"external_code_unauthorized", "external_code_url_missing", "external_code_url_invalid":
 		return true
+	case
+		// 走授权接口读信的三家，账号级的明确拒绝。这些码都表示「这份授权作废了，
+		// 重新登录之前读不了」，而不是「这次没连上」。
+		"microsoft_token_rejected", "microsoft_refresh_token_invalid",
+		"google_token_rejected", "google_refresh_token_missing", "google_oauth_failed",
+		"google_permission_denied",
+		// 苹果母号连登录态都没有，那就没有任何一条取码通道可用。
+		"icloud_session_missing":
+		return true
 	}
 	return false
 }
@@ -244,6 +427,8 @@ func probeBaseItem(mailbox domain.Mailbox) MailboxProbeItem {
 		Email:         mailbox.Email,
 		Label:         mailbox.Label,
 		Provider:      mailbox.ProviderOrDefault(),
+		Level:         probeLevelMailbox,
+		AccountID:     mailbox.AccountID,
 		LocalReceived: mailbox.ReceiveCount,
 		Status:        mailbox.Status,
 		InPool:        !mailbox.PoolHidden,
