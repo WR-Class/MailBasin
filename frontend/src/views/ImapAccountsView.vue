@@ -8,6 +8,7 @@ import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
 import AccountInboxPanel from '../components/AccountInboxPanel.vue'
 import ListPager from '../components/ListPager.vue'
+import MailboxHealthCheck from '../components/MailboxHealthCheck.vue'
 
 // QQ 和 163 共用这一个组件，靠路由上的 preset 分开。
 // 两者协议完全相同，只是服务器地址不同，所以复制一份页面没有意义。
@@ -569,6 +570,10 @@ onBeforeUnmount(() => {
       <header class="apple-command-bar">
         <div class="apple-command-title"><span><MailOpen :size="16" /></span><div><h2>{{ presetName }}</h2><p>用标准 IMAP + 客户端授权码收信，名下地址默认只在本页</p></div></div>
         <div class="apple-command-actions">
+          <!-- 这一页的地址各有自己的授权码，所以结论按地址给，而不是按母号给。
+               而且它取的是名下全部地址，包含默认不进池的那些——要在进池之前筛，
+               就得连池外的一起看。 -->
+          <MailboxHealthCheck :accounts="accounts" :title="presetName" level="mailbox" />
           <button class="primary-button apple-command-button" title="添加一个邮箱，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加{{ presetLabel }}</button>
           <button class="secondary-button apple-command-button" title="一次粘贴多个邮箱，每行「邮箱:授权码」，每行都是独立的母号" @click="openBatchDialog"><FileUp :size="14" />批量添加</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该邮箱名下所有地址的收件箱' : '请先选择一个邮箱'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此邮箱</button>

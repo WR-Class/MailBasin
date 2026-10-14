@@ -864,7 +864,15 @@ textarea.field {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  /* 允许换行：体检面板要占满一整行落在按钮下面。不换行的话它会被挤在同一行里。 */
+  flex-wrap: wrap;
   gap: 7px;
+}
+
+/* 体检面板占满一整行。它由共用组件渲染在工具条内部，靠这条规则落到按钮下面。 */
+.mailbox-health-panel {
+  flex-basis: 100%;
+  margin-top: 2px;
 }
 
 .apple-command-button,

@@ -7,6 +7,7 @@ import { subscribeRealtime } from '../composables/useRealtime'
 import { useToast } from '../composables/useToast'
 import AccountInboxPanel from '../components/AccountInboxPanel.vue'
 import ListPager from '../components/ListPager.vue'
+import MailboxHealthCheck from '../components/MailboxHealthCheck.vue'
 
 const loading = ref(true)
 const busyActions = ref([])
@@ -588,6 +589,8 @@ onBeforeUnmount(() => {
       <header class="apple-command-bar">
         <div class="apple-command-title"><span><Mail :size="16" /></span><div><h2>Microsoft 账号</h2><p>通过 Microsoft Graph 读取 Outlook 别名的验证码</p></div></div>
         <div class="apple-command-actions">
+          <!-- 名下别名共用母号那一份授权，所以结论按母号给。 -->
+          <MailboxHealthCheck :accounts="data.items" title="Microsoft 账号" level="account" />
           <button class="primary-button apple-command-button" :disabled="!moduleReady" :title="moduleReady ? '使用设备码登录 Microsoft 账号' : 'Microsoft 模块已在配置中关闭'" @click="openLoginDialog"><Plus :size="14" />添加 Microsoft 账号</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('aliases')" :title="selected ? '从 Graph 读取该账号的全部邮件地址' : '请先选择一个 Microsoft 账号'" @click="discoverAliases"><LoaderCircle v-if="isBusy('aliases')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />发现别名</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '只把该账号的主邮箱地址写入邮箱池' : '请先选择一个 Microsoft 账号'" @click="importPrimary"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Mail v-else :size="14" />导入主地址</button>
