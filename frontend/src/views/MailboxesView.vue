@@ -154,7 +154,18 @@ const codeDialogBusy = computed(() => isBusy('code') || Boolean(codeMailbox.valu
 const quickEditTitle = computed(() => quickEditField.value === 'note' ? '修改备注' : '修改邮箱状态')
 const bulkDeleteEmailCount = computed(() => parseBulkDeleteEmails(bulkDeleteEmails.value).length)
 const selectedMailboxIDs = computed(() => selectedMailboxes.value.map((mailbox) => mailbox.id))
-const selectedDeletableCount = computed(() => selectedMailboxes.value.filter((mailbox) => !isMailboxDeleteBusy(mailbox.id)).length)
+// 「删除选中」必须按每个邮箱自己所属的类别分流，用的规则和行内那个按钮完全一样：主地址不许删、
+// Apple 的走远端彻底删除、其余的只删本地。从前这条路不看类别，把整批都当成 Apple 发出去，
+// 于是选中 5 个 IMAP 记录得到的是「成功 0｜失败 5」和一串「对应 Apple 账号登录态不存在」。
+const selectedDeletePlan = computed(() => {
+  const plan = { remote: [], local: [], blocked: [], busy: [] }
+  for (const mailbox of selectedMailboxes.value) {
+    if (isMailboxDeleteBusy(mailbox.id)) plan.busy.push(mailbox)
+    else plan[deleteModeFor(mailbox)].push(mailbox)
+  }
+  return plan
+})
+const selectedDeletableCount = computed(() => selectedDeletePlan.value.remote.length + selectedDeletePlan.value.local.length)
 const selectedPageCount = computed(() => (result.value.items || []).filter((mailbox) => selectedMailboxIDs.value.includes(mailbox.id)).length)
 const allPageMailboxesSelected = computed(() => Boolean(result.value.items?.length) && selectedPageCount.value === result.value.items.length)
 const somePageMailboxesSelected = computed(() => selectedPageCount.value > 0 && !allPageMailboxesSelected.value)
@@ -182,8 +193,17 @@ function mailboxAppleAccount(mailbox) {
 }
 
 function mailboxProvider(mailbox) {
+  // 先看记录自己写的服务商：那是逐条的事实。账号表只是补充——apple_accounts 这张表里装着
+  // 所有账号（458 条里有 IMAP 的），所以按 id 去账号表里查，可能查到一个属于别的服务商的条目。
+  const own = String(mailbox?.provider || '').trim()
+  if (own) return own
   const account = accountByID.value.get(mailbox?.account_id)
-  return account?.provider || mailbox?.provider || 'icloud'
+  const fromAccount = String(account?.provider || '').trim()
+  if (fromAccount) return fromAccount
+  // 认不出来就别猜。兜底成 icloud 会把一条普通邮箱送去走 Apple 的远端彻底删除：那一步需要
+  // iCloud 登录态，它根本没有，于是只会失败；而如果哪天恰好有登录态，它会去删一个属于别处的
+  // 隐私邮箱。认不出就按「没有远端可清理」处理，只删本地——这一步是可恢复的那一侧。
+  return ''
 }
 
 // 彻底删除是 Apple 专有动作：它要 iCloud 登录态，还要在 Apple 服务器上删掉那个隐私邮箱。
@@ -198,6 +218,13 @@ function supportsRemoteDelete(mailbox) {
 // 寄到主地址的信会被算成「未匹配」直接丢掉——主信箱静默停收。
 function isPrimaryMailbox(mailbox) {
   return String(mailbox?.remote_origin || '').toLowerCase().endsWith('_primary')
+}
+
+// 一个邮箱该走哪条删除路径。行内那个按钮和「删除选中」都从这里取，两边再也分不出规则差异——
+// 这条规则原本只写在行内的分支里，批量那条路各写各的，于是漏掉了服务商。
+function deleteModeFor(mailbox) {
+  if (!mailbox || isPrimaryMailbox(mailbox)) return 'blocked'
+  return supportsRemoteDelete(mailbox) ? 'remote' : 'local'
 }
 
 // 「清理与删除」区块的说明文字必须和那一格实际给出的按钮一致：主地址连「只删本地」
@@ -270,11 +297,15 @@ function isMailboxSelected(mailboxID) {
   return selectedMailboxIDs.value.includes(mailboxID)
 }
 
+// 选择集必须存整行。从前这里只留 id 和 email，于是「删除选中」拿到手的对象没有服务商、
+// 也没有所属账号，逐条判断只能兜底成 icloud，把一批普通邮箱当成 Apple 去走远端彻底删除——
+// 每一项都在「对应 Apple 账号登录态不存在」那一步失败。行内那个按钮传的是整行，所以它一直是对的：
+// 同一条规则，两条路径拿到的数据不一样，结果就不一样。
 function toggleMailboxSelection(mailbox) {
   if (!mailbox || isMailboxDeleteBusy(mailbox.id)) return
   selectedMailboxes.value = isMailboxSelected(mailbox.id)
     ? selectedMailboxes.value.filter((item) => item.id !== mailbox.id)
-    : [...selectedMailboxes.value, { id: mailbox.id, email: mailbox.email }]
+    : [...selectedMailboxes.value, { ...mailbox }]
 }
 
 function toggleAllMailboxSelection() {
@@ -288,7 +319,7 @@ function toggleAllMailboxSelection() {
   const selectedIDs = new Set(selectedMailboxIDs.value)
   selectedMailboxes.value = [
     ...selectedMailboxes.value,
-    ...pageMailboxes.filter((mailbox) => !selectedIDs.has(mailbox.id)).map((mailbox) => ({ id: mailbox.id, email: mailbox.email })),
+    ...pageMailboxes.filter((mailbox) => !selectedIDs.has(mailbox.id)).map((mailbox) => ({ ...mailbox })),
   ]
 }
 
@@ -1497,22 +1528,34 @@ async function cleanAllAppleMail() {
 }
 
 async function removeSelectedMailboxes() {
-  const targets = selectedMailboxes.value.filter((mailbox) => !isMailboxDeleteBusy(mailbox.id))
-  if (!targets.length) return
+  const plan = selectedDeletePlan.value
+  const targets = [...plan.remote, ...plan.local]
+  if (!targets.length) {
+    flash(plan.blocked.length ? '选中的都是主地址。主地址就是那一行账号本身，删掉它的池子记录会让寄到主地址的信被丢弃，所以不提供删除' : '选中的邮箱都已在删除队列中', true)
+    return
+  }
   if (deleteConfirmID.value) {
     flash('请先完成当前删除确认', true)
     return
   }
   deleteConfirmID.value = 'selected'
   try {
+    const parts = []
+    if (plan.remote.length) parts.push(`${plan.remote.length} 个彻底删除：按本地已同步邮件保存的远端标识，把对应 Apple 邮件移入废纸篓并清空所属账号的整个废纸篓，再删除 Apple 隐私邮箱和本地记录`)
+    if (plan.local.length) parts.push(`${plan.local.length} 个只删本地：这类邮箱没有 Apple 远端可清理，会先清空本地邮件再删掉本地记录，Apple 服务器上的隐私邮箱保留`)
+    const excluded = plan.blocked.length ? `　选中的 ${plan.blocked.length} 个主地址不会被执行：删掉它们所属的池子记录，寄到主地址的信会因为匹配不到任何本地地址而被丢弃。` : ''
     const confirmed = await confirmAction({
-      title: `彻底删除选中的 ${targets.length} 个邮箱`,
-      message: '将根据本地已同步邮件保存的远端标识，逐个把对应 Apple 邮件移入废纸篓并清空所属账号的整个废纸篓，然后删除 Apple 隐私邮箱和本地记录。未同步到本地的历史邮件不会参与定位。',
-      confirmText: '确认彻底删除',
+      title: `删除选中的 ${targets.length} 个邮箱`,
+      message: `按每个邮箱自己所属的类别分别处理——${parts.join('；')}。未同步到本地的历史邮件不会参与定位，此操作不可恢复。${excluded}`,
+      confirmText: '确认删除',
       tone: 'danger',
     })
     if (!confirmed) return
-    enqueueMailboxDeletions(targets)
+    // localOnly 逐项给，不整批共用一个：一批里可以同时有走远端和只删本地的两种。
+    enqueueMailboxDeletions([
+      ...plan.remote.map((mailbox) => ({ ...mailbox, localOnly: false })),
+      ...plan.local.map((mailbox) => ({ ...mailbox, localOnly: true })),
+    ])
   } finally {
     deleteConfirmID.value = ''
   }
@@ -1560,7 +1603,7 @@ function updateDeleteProgress() {
   if (!total) return
   deleteNoticeID = updateToast(
     deleteNoticeID,
-    `彻底删除邮箱：执行中 ${running}｜排队中 ${waiting}｜已完成 ${finished}/${total}（成功 ${deleteSucceeded}，失败 ${deleteFailed}）`,
+    `删除邮箱：执行中 ${running}｜排队中 ${waiting}｜已完成 ${finished}/${total}（成功 ${deleteSucceeded}，失败 ${deleteFailed}）`,
     'info',
     0,
   )
@@ -1570,8 +1613,8 @@ function finishDeleteProgress() {
   const total = deleteSucceeded + deleteFailed
   const type = deleteFailed ? (deleteSucceeded ? 'warning' : 'error') : 'success'
   const text = deleteFailed
-    ? `彻底删除邮箱已结束：成功 ${deleteSucceeded}｜失败 ${deleteFailed}${deleteLastError ? `；最近错误：${deleteLastError}` : ''}`
-    : `彻底删除邮箱已完成：成功 ${total}｜失败 0`
+    ? `删除邮箱已结束：成功 ${deleteSucceeded}｜失败 ${deleteFailed}${deleteLastError ? `；最近错误：${deleteLastError}` : ''}`
+    : `删除邮箱已完成：成功 ${total}｜失败 0`
   deleteNoticeID = updateToast(deleteNoticeID, text, type, 7000)
 }
 
@@ -1736,7 +1779,7 @@ onBeforeUnmount(() => {
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('external-import')" title="导入没有母号、没有密码，只有取件接口的邮箱" @click="openExternalImportDialog"><LoaderCircle v-if="isBusy('external-import')" :size="14" class="animate-spin" /><CloudDownload v-else :size="14" />导入外部取码邮箱</button>
           <button type="button" class="secondary-button mailbox-command-button" :disabled="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" title="扫描并彻底删除全部 Apple 账号的云端和本地邮件" @click="cleanAllAppleMail"><LoaderCircle v-if="isBusy('clean-summary') || isBusy('clean-start') || appleMailCleanup.running" :size="14" class="animate-spin" /><CloudOff v-else :size="14" />{{ isBusy('clean-summary') ? '正在统计邮件' : isBusy('clean-start') ? '正在启动清理' : appleMailCleanup.running ? `正在清理 ${appleMailCleanup.completed || 0}/${appleMailCleanup.total_accounts || 0}` : '全部彻底清理 Apple 邮件' }}</button>
           <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="isBusy('bulk-delete-resolve')" title="按邮箱地址批量彻底删除 Apple 云端和本地邮箱" @click="openBulkDeleteDialog"><Trash2 :size="14" />批量删除指定邮箱</button>
-          <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="!selectedDeletableCount || deleteConfirmID === 'selected'" :title="selectedDeletableCount ? `彻底删除选中的 ${selectedDeletableCount} 个邮箱` : '请先选择未进入删除队列的邮箱'" @click="removeSelectedMailboxes"><LoaderCircle v-if="deleteConfirmID === 'selected'" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />删除选中{{ selectedDeletableCount ? `（${selectedDeletableCount}）` : '' }}</button>
+          <button type="button" class="secondary-button mailbox-command-button mailbox-command-button-danger" :disabled="!selectedDeletableCount || deleteConfirmID === 'selected'" :title="selectedDeletableCount ? `删除选中的 ${selectedDeletableCount} 个邮箱（彻底删除 ${selectedDeletePlan.remote.length} 个，只删本地 ${selectedDeletePlan.local.length} 个${selectedDeletePlan.blocked.length ? `，跳过 ${selectedDeletePlan.blocked.length} 个主地址` : ''}）` : '请先选择未进入删除队列的邮箱'" @click="removeSelectedMailboxes"><LoaderCircle v-if="deleteConfirmID === 'selected'" :size="14" class="animate-spin" /><Trash2 v-else :size="14" />删除选中{{ selectedDeletableCount ? `（${selectedDeletableCount}）` : '' }}</button>
         </div>
       </div>
       <div v-if="healthCheck.running || healthCheck.report" data-health-panel class="mx-3 mb-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs dark:border-slate-700 dark:bg-slate-800/60">
