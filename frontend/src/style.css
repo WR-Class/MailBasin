@@ -173,27 +173,16 @@ textarea.field {
 }
 
 /* 横向铺满内容区。这里原来有一道 1600px 的上限再加居中，窗口比它宽时整页两侧就空出一块——
-   操作者要的就是铺满，所以去掉上限；贴边问题交给内容区自己的内边距。 */
-/* 纵向也铺满：页面本身纵向排布、卡片作为唯一子项撑满，底部不再空出一大块。
-   实测过底部空出的原因不是内边距（各页下内边距与最小高度都是 0），而是卡片高度由内容决定：
-   邮箱池的内容正好够高（空出 61），Apple 页只到窗口上方 140 处、Gmail 97、任务页 42，
-   下面那段就是背景。让页面至少占满内容区高度、并让卡片把多出来的高度接住，各页就一致了。 */
+   操作者要的就是铺满，所以去掉上限；贴边问题交给内容区自己的内边距。
+   注意：不要在这里给页面加「纵向撑满」。账号页的列表区有自己的高度规则
+   （apple-account-body 用 clamp 限制在 430–720px，表格在里面滚动），外层一撑，
+   里层跟着被拉坏——真实出现过「列表只剩一行、下面全空白」，所以只横向铺满。 */
 .mailbox-page,
 .apple-account-page,
 .settings-page,
 .task-page {
-  display: flex;
-  flex-direction: column;
   width: 100%;
-  min-height: 100%;
   margin: 0 auto;
-}
-
-.mailbox-page > .panel,
-.apple-account-page > .panel,
-.settings-page > .panel,
-.task-page > .panel {
-  flex: 1 1 auto;
 }
 
 .mailbox-workbench {
