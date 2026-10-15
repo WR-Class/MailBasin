@@ -121,13 +121,16 @@ const mailboxDetailStatusOptions = [
   { value: 'failed', label: '失败', dot: 'bg-rose-500' },
   { value: 'disabled', label: '已停用', dot: 'bg-slate-500' },
 ]
-// 三个服务商的账号来自各自的接口，这里合并成一个列表，每条打上 provider 标记。
+// 四个来源的账号来自各自的接口，这里合并成一个列表，每条打上 provider 标记。
 // 筛选、分组、列显示和按账号的操作都依赖这个标记。
-const PROVIDER_LABELS = { icloud: 'iCloud', microsoft: 'Microsoft', google: 'Google' }
+// IMAP（QQ/163/Gmail）也在其中：这一类占库里绝大多数邮箱，缺了它，
+// 邮箱池里所有 imap 行都会显示「imap（账号未加载）」，账号筛选也筛不到它们。
+const PROVIDER_LABELS = { icloud: 'iCloud', microsoft: 'Microsoft', google: 'Google', imap: 'QQ/163/Gmail' }
 const ACCOUNT_ENDPOINTS = [
   ['icloud', '/api/apple-accounts'],
   ['microsoft', '/api/microsoft-accounts'],
   ['google', '/api/google-accounts'],
+  ['imap', '/api/imap-accounts'],
 ]
 function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || provider || 'iCloud'
@@ -987,16 +990,24 @@ async function refreshMailboxPool() {
   }
 }
 
-// 并行拉取三个服务商的账号并合并。
+// 并行拉取四个来源的账号并合并。
 // 单个接口失败（例如某个模块被关掉）不能清空整个列表，所以逐个兜住错误，
-// 只有三个都失败才提示。
+// 只有全部失败才提示。
+// 每页按 200 拉并翻到拿完：IMAP 母号有几百个，一页 20 条的话账号筛选只能看到
+// 头 20 个，其余账号名下的邮箱照样显示「账号未加载」（后端单页上限就是 200）。
 async function loadAccounts() {
   const merged = []
   let failed = 0
   await Promise.all(ACCOUNT_ENDPOINTS.map(async ([provider, path]) => {
     try {
-      const data = await api(path)
-      for (const item of data.items || []) merged.push({ ...item, provider: item.provider || provider })
+      let page = 1
+      for (;;) {
+        const data = await api(`${path}${path.includes('?') ? '&' : '?'}page_size=200&page=${page}`)
+        for (const item of data.items || []) merged.push({ ...item, provider: item.provider || provider })
+        const totalPages = Number(data.total_pages || 1)
+        if (page >= totalPages || !(data.items || []).length) break
+        page += 1
+      }
     } catch {
       failed += 1
     }
