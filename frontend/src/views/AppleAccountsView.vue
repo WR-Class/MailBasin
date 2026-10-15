@@ -242,6 +242,56 @@ async function deleteAccount(account) {
   }
 }
 
+// 勾选与批量删除：批量对每个勾选的账号套用它自己那一行的删除（与行尾按钮同一接口、同一语义）。
+// 一个都不勾时按钮是禁用的——不可恢复的动作不做「不勾即全部」那种默认。
+// 这里的删除是「摘除本地登录态」：Apple 服务器上的隐私邮箱保留，确认框要照实说。
+const checkedIDs = ref([])
+const allPageChecked = computed(() => filteredItems.value.length > 0 && filteredItems.value.every((account) => checkedIDs.value.includes(account.id)))
+const somePageChecked = computed(() => !allPageChecked.value && filteredItems.value.some((account) => checkedIDs.value.includes(account.id)))
+function togglePageSelection() {
+  const ids = filteredItems.value.map((account) => account.id)
+  if (allPageChecked.value) checkedIDs.value = checkedIDs.value.filter((id) => !ids.includes(id))
+  else checkedIDs.value = [...new Set([...checkedIDs.value, ...ids])]
+}
+function toggleAccountSelection(account) {
+  checkedIDs.value = checkedIDs.value.includes(account.id)
+    ? checkedIDs.value.filter((id) => id !== account.id)
+    : [...checkedIDs.value, account.id]
+}
+async function removeCheckedAccounts() {
+  const targets = filteredItems.value.filter((account) => checkedIDs.value.includes(account.id))
+  if (!targets.length) return
+  const ok = await confirmAction({
+    title: `删除 ${targets.length} 个 Apple 账号`,
+    message: `将逐个删除勾选的 ${targets.length} 个账号：每个的本地登录态、关联隐私邮箱和本地邮件一并删除，Apple 服务器上的隐私邮箱不会删除，且删除不可恢复。未勾选的不受影响。`,
+    confirmText: '删除账号',
+    tone: 'danger',
+  })
+  if (!ok) return
+  let done = 0
+  const failures = []
+  for (const account of targets) {
+    const name = account.label || account.apple_id || account.id
+    const busyKey = `delete:${account.id}`
+    if (!startBusy(busyKey)) continue
+    try {
+      const result = await api(`/api/apple-accounts/${account.id}`, { method: 'DELETE' })
+      done += 1
+      checkedIDs.value = checkedIDs.value.filter((id) => id !== account.id)
+      const deleted = result.deleted || {}
+      flash(`已删除 Apple 账号：${name}；清理邮箱 ${deleted.mailboxes || 0} 个，邮件 ${deleted.messages || 0} 封`)
+    } catch (err) {
+      failures.push(`${name}：${err.message}`)
+    } finally {
+      finishBusy(busyKey)
+    }
+  }
+  if (selected.value && targets.some((account) => account.id === selected.value.id)) selected.value = null
+  await load()
+  if (failures.length) flash(`批量删除已结束：成功 ${done}｜失败 ${failures.length}；最近错误：${failures[failures.length - 1]}`, true)
+  else flash(`批量删除已结束：成功 ${done}`)
+}
+
 async function selectAccount(account) {
   const busyKey = `detail:${account.id}`
   if (!startBusy(busyKey)) return
@@ -403,6 +453,7 @@ onBeforeUnmount(() => {
           <button class="primary-button apple-command-button" @click="openLoginDialog"><Plus :size="14" />添加 Apple 账号</button>
           <button class="secondary-button apple-command-button" :disabled="!selected" :title="selected ? `为 ${selected.apple_id} 配置 IMAP` : '请先选择一个 Apple 账号'" @click="openIMAPDialog"><KeyRound :size="14" />IMAP 取码</button>
           <button class="secondary-button apple-command-button" :disabled="!selected" :title="selected ? `使用 ${selected.apple_id} 创建隐私邮箱` : '请先选择一个 Apple 账号'" @click="openCreateDialog"><MailPlus :size="14" />创建隐私邮箱</button>
+          <button class="secondary-button apple-command-button" :disabled="!checkedIDs.length" :title="checkedIDs.length ? `逐个删除勾选的 ${checkedIDs.length} 个账号：每个的本地登录态、关联隐私邮箱和本地邮件一并删除，Apple 服务器上的隐私邮箱不会删除，且不可恢复` : '批量删除只作用在勾选的那些账号上：一个都不勾就不删。这是不可恢复的动作，不做「不勾即全部」'" @click="removeCheckedAccounts"><Trash2 :size="14" />批量删除{{ checkedIDs.length ? `（${checkedIDs.length}）` : '' }}</button>
         </div>
       </header>
 
@@ -413,18 +464,19 @@ onBeforeUnmount(() => {
           <div v-if="!data.items?.length" class="apple-empty"><span><Server :size="20" /></span><strong>{{ query.trim() ? '没有匹配的 Apple 账号' : '还没有 Apple 账号' }}</strong><small>{{ query.trim() ? '换个关键词试试，或清空搜索框。' : '点击“添加 Apple 账号”完成首次协议登录。' }}</small></div>
           <div v-else class="apple-account-table-viewport">
             <table class="apple-account-table">
-              <colgroup><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
-              <thead><tr><th>Apple 账号</th><th>状态</th><th>登录通道</th><th>操作</th></tr></thead>
+              <colgroup><col class="apple-col-check" /><col class="apple-col-account" /><col class="apple-col-status" /><col class="apple-col-channel" /><col class="apple-col-action" /></colgroup>
+              <thead><tr><th class="apple-check-cell"><input type="checkbox" :checked="allPageChecked" :indeterminate="somePageChecked" :disabled="!filteredItems.length" title="全选本页" aria-label="全选本页账号" @change="togglePageSelection" /></th><th>Apple 账号</th><th>状态</th><th>登录通道</th><th>操作</th></tr></thead>
               <tbody>
                 <template v-for="account in filteredItems" :key="account.id">
                 <tr class="apple-account-row" :class="{ 'apple-account-row-selected': selected?.id === account.id }" tabindex="0" :aria-expanded="selected?.id === account.id" :aria-label="`查看 ${account.label || account.apple_id || 'Apple 账号'} 的登录态详情`" @click="toggleAccount(account)" @keydown.enter="toggleAccount(account)" @keydown.space.prevent="toggleAccount(account)">
+                  <td class="apple-check-cell"><input type="checkbox" :checked="checkedIDs.includes(account.id)" :aria-label="`勾选 ${account.label || account.apple_id || 'Apple 账号'}`" @click.stop @change="toggleAccountSelection(account)" /></td>
                   <td><button type="button" class="apple-account-select" :disabled="isBusy(`delete:${account.id}`) || isBusy(`detail:${account.id}`)" @click.stop="selectAccount(account)"><span class="apple-account-icon"><LoaderCircle v-if="isBusy(`detail:${account.id}`)" :size="14" class="animate-spin" /><Apple v-else :size="14" /></span><span><strong>{{ account.label || account.apple_id || 'Apple 账号' }}</strong><small>{{ account.apple_id || account.id }}</small></span></button></td>
                   <td><span :class="accountStatusClass(account)" class="apple-status-badge">{{ statusLabel(account.icloud_status || account.status) }}</span></td>
                   <td><div class="apple-channel-list"><span v-for="state in account.login_states" :key="state.kind" class="apple-channel-pill"><component :is="stateMeta(state.kind).icon" :size="11" /><span>{{ stateLabel(state.kind) }}</span><em :class="stateStatusClass(state)">{{ stateStatusLabel(state) }}</em></span><span v-if="!account.login_states?.length" class="apple-channel-empty">暂无登录态</span></div></td>
                   <td><button type="button" class="apple-delete-button" :title="`删除 ${account.label || account.apple_id || 'Apple 账号'}`" :aria-label="`删除 ${account.label || account.apple_id || 'Apple 账号'}`" :disabled="isBusy(`delete:${account.id}`)" @click.stop="deleteAccount(account)"><LoaderCircle v-if="isBusy(`delete:${account.id}`)" :size="13" class="animate-spin" /><Trash2 v-else :size="13" /></button></td>
                 </tr>
                 <tr v-if="selected?.id === account.id" class="apple-account-expand-row">
-                  <td colspan="4" class="apple-account-expand-cell">
+                  <td colspan="5" class="apple-account-expand-cell">
                     <div class="apple-account-expand-body">
                       <!-- ① 登录态：折叠 + 就地可检测。 -->
                       <section class="detail-section">
