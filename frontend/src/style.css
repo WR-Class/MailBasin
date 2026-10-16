@@ -885,10 +885,65 @@ textarea.field {
   gap: 7px;
 }
 
-/* 体检面板占满一整行。它由共用组件渲染在工具条内部，靠这条规则落到按钮下面。 */
-.mailbox-health-panel {
-  flex-basis: 100%;
-  margin-top: 2px;
+/* 体检报告是弹窗，不再是工具条里的一行。
+   内嵌时它能列几十条读不了的地址，把页面整个撑长，于是页面上多出一条滚动条，
+   而账号/邮箱列表自己那条还在——两条滚动条抢滚轮，往下翻时分不清在翻哪一层。 */
+.mailbox-health-dialog {
+  width: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  /* 整个弹窗不再自己滚：滚动条只留给报告列表，标题和按钮始终留在原地。 */
+  overflow: hidden;
+}
+
+.mailbox-health-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
+  background: rgb(248 250 252);
+  font-size: 11px;
+}
+
+.dark .mailbox-health-summary {
+  border-color: rgb(51 65 85);
+  background: rgb(30 41 59 / 60%);
+}
+
+.mailbox-health-list {
+  /* min-height: 0 是必须的：flex 子项默认不肯缩到内容以下，缺了它列表不会滚，
+     而是把弹窗顶破。 */
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11px;
+}
+
+.mailbox-health-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid rgb(241 245 249);
+}
+
+.dark .mailbox-health-list li {
+  border-bottom-color: rgb(51 65 85);
+}
+
+.mailbox-health-empty {
+  margin: 0;
+  padding: 12px 2px;
+  color: var(--app-muted);
+  font-size: 11px;
 }
 
 .apple-command-button,

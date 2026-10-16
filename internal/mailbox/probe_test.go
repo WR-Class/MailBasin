@@ -25,8 +25,11 @@ func seedIMAPMailbox(t *testing.T, service *Service, email, secret string) domai
 	return mailbox
 }
 
-// 体检不能只出报告：明确判成凭据失效的，账号列表上也要跟着变成失败；
-// 而网络类失败（同一个错误码，可重试）不能改账号状态——摘错一个好邮箱的代价远大于漏报。
+// 体检不能只出报告：结论必须落到账号列表上，否则行上一直挂着「正常」，使用者看不出可用性。
+//
+// 三档的证据强度不同，处置也不同：能读→正常；凭据被明确拒绝→失败；只是这次没连上→
+// 「连不上」（只改显示、绝不摘池）。后两档的差别是这张表要盯住的核心——同一条网络失败
+// 若写成失败，一次抖动就会被读成「授权作废」并连带摘池，而摘错的代价远大于漏报。
 func TestProbeMailboxesUpdatesIMAPAccountStatus(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -35,9 +38,9 @@ func TestProbeMailboxesUpdatesIMAPAccountStatus(t *testing.T) {
 		retryable  bool
 		wantStatus string
 	}{
-		{"明确拒绝后账号显示失败", domain.StatusActive, "imap_login_failed", false, domain.StatusFailed},
-		{"同码网络失败不误改账号", domain.StatusActive, "imap_login_failed", true, domain.StatusActive},
-		{"连接失败不误改账号", domain.StatusActive, "imap_dial_failed", true, domain.StatusActive},
+		{"明确拒绝后账号显示失败", domain.StatusActive, "imap_login_failed", false, domain.ICloudStatusFailed},
+		{"同码网络失败标成连不上而不是正常", domain.StatusActive, "imap_login_failed", true, domain.ICloudStatusUnreachable},
+		{"连接失败标成连不上", domain.StatusActive, "imap_dial_failed", true, domain.ICloudStatusUnreachable},
 		{"检查成功后恢复账号显示但不自动入池", domain.StatusFailed, "", false, domain.StatusActive},
 	}
 	for _, tc := range cases {
@@ -66,14 +69,68 @@ func TestProbeMailboxesUpdatesIMAPAccountStatus(t *testing.T) {
 			if !ok || account.ICloudStatus != tc.wantStatus {
 				t.Fatalf("体检后账号状态应为 %q，实际 %+v", tc.wantStatus, account)
 			}
+			// 使用者的备注不能被体检的结论顶掉：那是他自己的字段。
+			if account.Note != "检查前状态" {
+				t.Fatalf("体检不得覆盖账号备注，实际 %q", account.Note)
+			}
 			after, ok := service.store.FindMailboxByID(before.ID)
 			if !ok || after.PoolHidden != before.PoolHidden {
 				t.Fatal("体检不得自动改变入池选择")
 			}
-			if tc.retryable || tc.code == "" {
+			// 唯一允许改写邮箱使用状态的是「凭据被明确拒绝」；网络类失败和检查成功都只改显示。
+			if !probeCredentialRejected(report.Items[0]) {
 				if after.Status != before.Status {
-					t.Fatalf("网络失败或检查成功不得改写邮箱使用状态：%q -> %q", before.Status, after.Status)
+					t.Fatalf("非凭据失效的结论不得改写邮箱使用状态：%q -> %q", before.Status, after.Status)
 				}
+			}
+		})
+	}
+}
+
+// 体检改写账号状态有两个前置条件，缺一个都不许动手，因为它们各自防一种串改：
+// 一是当前状态必须是「体检或同步留下的结论」——需要授权码、等待 2FA 这类是别的机制
+// 写下的、含义更具体的事实；二是被检查的地址必须就是母号的主地址——别名可能自带独立
+// 凭据，按别名的结论改母号会把母号的状态说成一件它没经历的事。
+func TestProbeMailboxesLeavesForeignAccountStatusAlone(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial string
+		alias   bool
+	}{
+		{"需要授权码的状态不被体检覆盖", "need_login", false},
+		{"别名的结论不改写母号状态", domain.StatusActive, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newIMAPFixture(t)
+			accountID := createIMAPAccount(t, service, "qq", "123456@qq.com", "secret")
+			if err := service.store.SetIMAPAccountStatus(accountID, tc.initial, "别处写的状态"); err != nil {
+				t.Fatal(err)
+			}
+			target := service.store.MailboxesByAccount(accountID)[0]
+			if tc.alias {
+				if _, err := service.AddIMAPAccountAddresses(accountID, []IMAPMailboxInput{{Email: "alias@qq.com"}}); err != nil {
+					t.Fatal(err)
+				}
+				for _, mailbox := range service.store.MailboxesByAccount(accountID) {
+					if mailbox.Email == "alias@qq.com" {
+						target = mailbox
+					}
+				}
+			}
+			service.imapInspect = func(context.Context, string, int, string, string) (protocol.GenericIMAPStat, error) {
+				return protocol.GenericIMAPStat{}, protocol.NewCodedError("imap_login_failed", "模拟凭据被拒", false)
+			}
+			report := service.ProbeMailboxes(context.Background(), []string{target.ID})
+			if report.Items[0].AccountStatus != "" {
+				t.Fatalf("这次不该写账号状态，实际写成 %q", report.Items[0].AccountStatus)
+			}
+			account, _ := service.store.FindAppleAccount(accountID)
+			if account.ICloudStatus != tc.initial {
+				t.Fatalf("账号状态应保持 %q，实际 %q", tc.initial, account.ICloudStatus)
+			}
+			if account.Note != "别处写的状态" {
+				t.Fatalf("账号备注应保持原样，实际 %q", account.Note)
 			}
 		})
 	}

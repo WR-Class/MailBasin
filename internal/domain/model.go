@@ -43,6 +43,11 @@ const (
 	ICloudStatusRateLimited  = "rate_limited"
 	ICloudStatusPartial      = "partial"
 	ICloudStatusFailed       = "failed"
+	// ICloudStatusUnreachable：这次没读通，但失败被判定为网络类（可重试），
+	// 证据不足以断言凭据失效。它必须和 failed 分开，因为处置完全不同：
+	// failed 会被摘出邮箱池，unreachable 只改显示、不动池子。
+	// 但两者都不能继续显示成「正常」——那正是体检看起来什么也没改变的原因。
+	ICloudStatusUnreachable = "unreachable"
 
 	LoginStateICloudWeb    = "icloud_web"
 	LoginStateAppleAccount = "apple_account"

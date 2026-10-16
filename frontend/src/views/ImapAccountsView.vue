@@ -85,13 +85,15 @@ function finishBusy(action) {
 }
 
 function statusLabel(value) {
-  return ({ active: '正常', partial: '部分地址失败', failed: '同步失败', need_login: '需要授权码' })[value] || value || '未知'
+  return ({ active: '正常', partial: '部分地址失败', failed: '同步失败', unreachable: '连不上', need_login: '需要授权码' })[value] || value || '未知'
 }
 
 function statusClass(account) {
   const status = account.icloud_status || account.status
   if (status === 'active') return 'bg-emerald-50 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-300'
-  if (status === 'partial') return 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300'
+  // 「连不上」用琥珀色，与凭据失效的红色分开：这一次没连上不等于授权作废，
+  // 下一次体检连上就会自己回到正常。把它们画成同一种红，会让使用者去换一个没坏的授权码。
+  if (status === 'partial' || status === 'unreachable') return 'bg-amber-50 text-amber-600 dark:bg-amber-950/30 dark:text-amber-300'
   return 'bg-rose-50 text-rose-600 dark:bg-rose-950/30 dark:text-rose-300'
 }
 

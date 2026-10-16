@@ -72,6 +72,9 @@ type MailboxProbeItem struct {
 	// 需要人工恢复时照着改回去。
 	Demoted        bool   `json:"demoted"`
 	PreviousStatus string `json:"previous_status,omitempty"`
+	// AccountStatus 是本次按结论写回母号的状态（空表示没改）。它让界面能直接说清
+	// 「这个账号现在显示成什么」，而不必让使用者自己去账号页对照。
+	AccountStatus string `json:"account_status,omitempty"`
 }
 
 // MailboxProbeReport 汇总一次体检。
@@ -246,22 +249,38 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox, v
 		item.Code = "provider_not_covered"
 		item.Reason = "该服务商走授权接口读信，本次体检只覆盖 IMAP 与外部取码地址，没有检查它"
 	}
-	// 邮箱的使用状态与账号的读信状态是两回事：体检还要把明确结论写回账号列表。
-	// 只用主地址的结论更新对应服务商的母号，避免独立凭据的别名或同标识的其他服务商串改。
-	if mailbox.ProviderOrDefault() == domain.ProviderIMAP && mailbox.AccountID != "" &&
-		item.Covered && (item.Readable || probeCredentialRejected(item)) {
+	// 邮箱的使用状态与账号的读信状态是两回事：体检还要把结论写回账号列表。
+	// 只出一份报告、行上仍挂着「正常」，使用者就还在把一个读不了的母号当成好的——
+	// 「体检完必须能一眼看出能不能用」正是这个功能存在的理由。
+	//
+	// 写回分三档，证据强度不同，处置也不同：
+	//   能读        → 正常
+	//   凭据被明确拒绝 → 失败（下面还会把它的地址摘出邮箱池）
+	//   只是这次没连上 → 连不上：不足以断言凭据失效，所以只改显示、绝不摘池。
+	// 第三档必须有自己的名字。若直接写 failed，一次网络抖动就会被读成「授权作废」，
+	// 而 failed 又会连带摘池——那正是「摘错的代价远大于漏报」要防的事。
+	//
+	// 只用主地址的结论更新对应服务商的母号：别名可能自带独立凭据，同标识的其他
+	// 服务商也在同一张表里，按别名改会把别的行串掉。
+	if mailbox.ProviderOrDefault() == domain.ProviderIMAP && mailbox.AccountID != "" && item.Covered {
 		account, ok := s.store.FindAppleAccount(mailbox.AccountID)
 		if ok && account.ProviderOrDefault() == domain.ProviderIMAP &&
 			strings.EqualFold(strings.TrimSpace(account.AppleID), strings.TrimSpace(mailbox.Email)) &&
 			(account.Status == domain.StatusActive || account.Status == domain.StatusFailed) &&
-			(account.ICloudStatus == "" || account.ICloudStatus == domain.StatusActive ||
-				account.ICloudStatus == domain.StatusFailed || account.ICloudStatus == "partial") {
-			status := domain.StatusFailed
-			if item.Readable {
-				status = domain.StatusActive
+			probeCanRewriteAccountStatus(account.ICloudStatus) {
+			status := domain.ICloudStatusUnreachable
+			switch {
+			case item.Readable:
+				status = domain.ICloudStatusActive
+			case probeCredentialRejected(item):
+				status = domain.ICloudStatusFailed
 			}
-			if err := s.store.SetIMAPAccountStatus(account.ID, status, "体检："+item.Reason); err != nil {
+			// 说明留空：账号上的 note 是使用者自己写的备注，体检不该拿自己的结论把它顶掉，
+			// 而且这个字段在界面上根本不显示。写「为什么读不了」由报告负责。
+			if err := s.store.SetIMAPAccountStatus(account.ID, status, ""); err != nil {
 				item.Reason += "；但账号状态保存失败：" + err.Error()
+			} else {
+				item.AccountStatus = status
 			}
 		}
 	}
@@ -401,6 +420,20 @@ func (s *Service) probeICloudChannel(ctx context.Context, accountID string) prob
 		covered: true, readable: true, code: "icloud_imap_ok",
 		reason: "母号的 IMAP 取码登录正常",
 	}
+}
+
+// probeCanRewriteAccountStatus 判断体检当前能不能改写这个账号的状态槽位。
+//
+// 只认「上一次也是体检或同步留下的结论」（空、正常、部分失败、失败、连不上）。
+// 需要登录、等待 2FA、无 iCloud+、访问受限这些是别的机制写下的、含义更具体的事实，
+// 一次体检没有资格用自己那一句话覆盖它们。
+func probeCanRewriteAccountStatus(current string) bool {
+	switch strings.TrimSpace(current) {
+	case "", domain.ICloudStatusActive, domain.ICloudStatusPartial,
+		domain.ICloudStatusFailed, domain.ICloudStatusUnreachable:
+		return true
+	}
+	return false
 }
 
 // probeCredentialRejected 判断这次失败是不是「凭据或连接配置被明确拒绝或缺失」，
