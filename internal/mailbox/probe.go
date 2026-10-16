@@ -246,6 +246,25 @@ func (s *Service) probeOneMailbox(ctx context.Context, mailbox domain.Mailbox, v
 		item.Code = "provider_not_covered"
 		item.Reason = "该服务商走授权接口读信，本次体检只覆盖 IMAP 与外部取码地址，没有检查它"
 	}
+	// 邮箱的使用状态与账号的读信状态是两回事：体检还要把明确结论写回账号列表。
+	// 只用主地址的结论更新对应服务商的母号，避免独立凭据的别名或同标识的其他服务商串改。
+	if mailbox.ProviderOrDefault() == domain.ProviderIMAP && mailbox.AccountID != "" &&
+		item.Covered && (item.Readable || probeCredentialRejected(item)) {
+		account, ok := s.store.FindAppleAccount(mailbox.AccountID)
+		if ok && account.ProviderOrDefault() == domain.ProviderIMAP &&
+			strings.EqualFold(strings.TrimSpace(account.AppleID), strings.TrimSpace(mailbox.Email)) &&
+			(account.Status == domain.StatusActive || account.Status == domain.StatusFailed) &&
+			(account.ICloudStatus == "" || account.ICloudStatus == domain.StatusActive ||
+				account.ICloudStatus == domain.StatusFailed || account.ICloudStatus == "partial") {
+			status := domain.StatusFailed
+			if item.Readable {
+				status = domain.StatusActive
+			}
+			if err := s.store.SetIMAPAccountStatus(account.ID, status, "体检："+item.Reason); err != nil {
+				item.Reason += "；但账号状态保存失败：" + err.Error()
+			}
+		}
+	}
 	item.OfferedWhileUnreadable = item.Covered && !item.Readable &&
 		mailbox.Status == domain.StatusAvailable && !mailbox.PoolHidden
 	// 体检不能只出一份报告：报告没人看的时候，一个邮箱到底能不能用就没人知道。

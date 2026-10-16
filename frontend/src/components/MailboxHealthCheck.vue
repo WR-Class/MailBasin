@@ -21,6 +21,7 @@ const props = defineProps({
   level: { type: String, default: 'account' },
 })
 
+const emit = defineEmits(['completed'])
 const { success, error: showError } = useToast()
 const state = ref({ running: false, done: 0, total: 0, report: null })
 // 本次覆盖了哪些账号、多少个地址。必须说出来：这几页是分页的，组件拿到的是当前页列出的
@@ -81,6 +82,9 @@ async function runHealthCheck() {
   } catch (err) {
     state.value = { running: false, done: 0, total: 0, report: null }
     showError(`体检失败：${err.message}`)
+  } finally {
+    // 前面的小批次可能已经写回状态，即使后续批次失败也要刷新列表。
+    if (ids.length) emit('completed')
   }
 }
 

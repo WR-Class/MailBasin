@@ -449,7 +449,7 @@ onBeforeUnmount(() => {
         <div class="apple-command-title"><span><Apple :size="16" /></span><div><h2>Apple 账号</h2><p>管理登录态、IMAP 与隐私邮箱通道</p></div></div>
         <div class="apple-command-actions">
           <!-- 苹果隐私地址的验证码是母号读回来的，所以结论按母号给。 -->
-          <MailboxHealthCheck :accounts="data.items" title="Apple 账号" level="account" />
+          <MailboxHealthCheck :accounts="data.items" title="Apple 账号" level="account" @completed="load({ silent: true })" />
           <button class="primary-button apple-command-button" @click="openLoginDialog"><Plus :size="14" />添加 Apple 账号</button>
           <button class="secondary-button apple-command-button" :disabled="!selected" :title="selected ? `为 ${selected.apple_id} 配置 IMAP` : '请先选择一个 Apple 账号'" @click="openIMAPDialog"><KeyRound :size="14" />IMAP 取码</button>
           <button class="secondary-button apple-command-button" :disabled="!selected" :title="selected ? `使用 ${selected.apple_id} 创建隐私邮箱` : '请先选择一个 Apple 账号'" @click="openCreateDialog"><MailPlus :size="14" />创建隐私邮箱</button>

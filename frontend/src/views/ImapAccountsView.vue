@@ -622,7 +622,7 @@ onBeforeUnmount(() => {
           <!-- 这一页的地址各有自己的授权码，所以结论按地址给，而不是按母号给。
                而且它取的是名下全部地址，包含默认不进池的那些——要在进池之前筛，
                就得连池外的一起看。 -->
-          <MailboxHealthCheck :accounts="accounts" :title="presetName" level="mailbox" />
+          <MailboxHealthCheck :accounts="accounts" :title="presetName" level="mailbox" @completed="load({ silent: true })" />
           <button class="primary-button apple-command-button" title="添加一个邮箱，并把它的地址一起导入" @click="openCreateDialog"><Plus :size="14" />添加{{ presetLabel }}</button>
           <button class="secondary-button apple-command-button" title="一次粘贴多个邮箱，每行「邮箱:授权码」，每行都是独立的母号" @click="openBatchDialog"><FileUp :size="14" />批量添加</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy(`sync:${selected.id}`)" :title="selected ? '读一次该邮箱名下所有地址的收件箱' : '请先选择一个邮箱'" @click="syncAccount()"><LoaderCircle v-if="selected && isBusy(`sync:${selected.id}`)" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />同步此邮箱</button>
@@ -638,7 +638,6 @@ onBeforeUnmount(() => {
         <AlertCircle v-else :size="14" />
         <span v-if="batch.running">正在批量{{ batch.label }}：{{ batch.done }} / {{ batch.total }}<template v-if="batch.failed">，已失败 {{ batch.failed }}</template></span>
         <span v-else>已勾选 {{ checkedIDs.length }} 个母号，批量操作只作用在它们身上；一个都不勾则按当前筛选下的全部 {{ total }} 个算——<strong>批量删除除外</strong>：它必须勾选，不勾就不删。</span>
-        <button v-if="!batch.running" type="button" class="secondary-button apple-check-button" @click="checkedIDs = []">清除勾选</button>
       </div>
 
       <div v-if="moduleInfo.limit" class="apple-module-note">

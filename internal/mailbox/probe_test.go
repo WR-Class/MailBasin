@@ -25,6 +25,60 @@ func seedIMAPMailbox(t *testing.T, service *Service, email, secret string) domai
 	return mailbox
 }
 
+// 体检不能只出报告：明确判成凭据失效的，账号列表上也要跟着变成失败；
+// 而网络类失败（同一个错误码，可重试）不能改账号状态——摘错一个好邮箱的代价远大于漏报。
+func TestProbeMailboxesUpdatesIMAPAccountStatus(t *testing.T) {
+	cases := []struct {
+		name       string
+		initial    string
+		code       string
+		retryable  bool
+		wantStatus string
+	}{
+		{"明确拒绝后账号显示失败", domain.StatusActive, "imap_login_failed", false, domain.StatusFailed},
+		{"同码网络失败不误改账号", domain.StatusActive, "imap_login_failed", true, domain.StatusActive},
+		{"连接失败不误改账号", domain.StatusActive, "imap_dial_failed", true, domain.StatusActive},
+		{"检查成功后恢复账号显示但不自动入池", domain.StatusFailed, "", false, domain.StatusActive},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			service := newIMAPFixture(t)
+			accountID := createIMAPAccount(t, service, "qq", "123456@qq.com", "secret")
+			if err := service.store.SetIMAPAccountStatus(accountID, tc.initial, "检查前状态"); err != nil {
+				t.Fatal(err)
+			}
+			mailboxes := service.store.MailboxesByAccount(accountID)
+			if len(mailboxes) != 1 {
+				t.Fatalf("应有一个主地址，实际 %d", len(mailboxes))
+			}
+			before := mailboxes[0]
+			service.imapInspect = func(context.Context, string, int, string, string) (protocol.GenericIMAPStat, error) {
+				if tc.code != "" {
+					return protocol.GenericIMAPStat{}, protocol.NewCodedError(tc.code, "模拟检查失败", tc.retryable)
+				}
+				return protocol.GenericIMAPStat{Exists: 0}, nil
+			}
+			report := service.ProbeMailboxes(context.Background(), []string{before.ID})
+			if len(report.Items) != 1 || !report.Items[0].Covered {
+				t.Fatalf("应实际检查主地址，实际 %+v", report)
+			}
+			account, ok := service.store.FindAppleAccount(accountID)
+			if !ok || account.ICloudStatus != tc.wantStatus {
+				t.Fatalf("体检后账号状态应为 %q，实际 %+v", tc.wantStatus, account)
+			}
+			after, ok := service.store.FindMailboxByID(before.ID)
+			if !ok || after.PoolHidden != before.PoolHidden {
+				t.Fatal("体检不得自动改变入池选择")
+			}
+			if tc.retryable || tc.code == "" {
+				if after.Status != before.Status {
+					t.Fatalf("网络失败或检查成功不得改写邮箱使用状态：%q -> %q", before.Status, after.Status)
+				}
+			}
+		})
+	}
+}
+
 // 体检必须把三种处境分开报：登录不了、登录得了但收件箱是空的、登录得了且确实有信。
 // 混成一个「收信数 0」是这套判断最容易出错的地方——0 同时表示这三种完全不同的情况。
 func TestProbeMailboxesSeparatesUnreadableFromEmpty(t *testing.T) {

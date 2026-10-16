@@ -558,7 +558,7 @@ onBeforeUnmount(() => {
         <div class="apple-command-title"><span><Globe :size="16" /></span><div><h2>Google 账号</h2><p>通过 Gmail API 读取 + 标签地址的验证码</p></div></div>
         <div class="apple-command-actions">
           <!-- 名下地址共用母号那一份授权，所以结论按母号给。 -->
-          <MailboxHealthCheck :accounts="data.items" title="Google 账号" level="account" />
+          <MailboxHealthCheck :accounts="data.items" title="Google 账号" level="account" @completed="load({ silent: true })" />
           <button class="primary-button apple-command-button" :disabled="!moduleReady || !moduleConfigured" :title="loginTitle" @click="startLogin"><LoaderCircle v-if="isBusy('login-start')" :size="14" class="animate-spin" /><Plus v-else :size="14" />添加 Google 账号</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('aliases')" :title="selected ? '读取该账号当前可收信的地址' : '请先选择一个 Google 账号'" @click="discoverAliases"><LoaderCircle v-if="isBusy('aliases')" :size="14" class="animate-spin" /><RefreshCw v-else :size="14" />读取地址</button>
           <button class="secondary-button apple-command-button" :disabled="!selected || isBusy('import')" :title="selected ? '把主地址写入邮箱池' : '请先选择一个 Google 账号'" @click="importAliases"><LoaderCircle v-if="isBusy('import')" :size="14" class="animate-spin" /><Inbox v-else :size="14" />导入主地址</button>
