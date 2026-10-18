@@ -301,6 +301,7 @@ app-shell
 - **公告不是推送后立刻生效的。** 公告文件走 GitHub 的 raw CDN，而代码里那个 `?t=<时间戳>` cache-buster **不起作用**：CDN 的缓存键是路径，查询串不参与，请求头里的 `Cache-Control: no-cache` 也强制不了刷新。而且响应头带 `Vary: Accept-Encoding`，压缩与不压缩是**两个独立的缓存对象**——本服务用 Go 写、会自动发 gzip，命中的是压缩那份。实测：推送后最长 5 分钟（CDN 的 `max-age=300`）加上服务自己的 10 分钟内存缓存，约 **15 分钟**才传播到所有人。**改了版本号不要以为立刻生效**，也别用 curl 直取的结果去判断服务看到了什么（默认不发 `Accept-Encoding`，命中的是另一份缓存）。
 - **从老版本升上来、且 `data_path` 非默认值的人，第一次更新的进度卡片会是空的。** 那次跑的是**旧** `update.ps1`（PowerShell 启动时就把脚本读进内存了），旧版把状态写死在 `<repo>\data\run`，而新版服务从 `filepath.Dir(data_path)\run` 读。更新本身正常完成，只是那一次看不到进度；下一次恢复正常。默认 `data/app.db` 不受影响。
 - **锁文件**：仓库用 npm 的 `package-lock.json` 钉版本（已跟踪，是唯一凭据）。`pnpm-lock.yaml` 是构建副产品，已忽略。**统一用 npm**——混用会让新依赖进不了被跟踪的那份锁文件。重做界面本身不受影响，受影响的只有「装依赖」这一个动作。
+- **消息列表不返回正文，正文只在点开某一封时单独取。** `GET /api/mailboxes/{id}/messages` 的每一项只有列表要渲染的字段（主题、发件人、时间、`content_type` 等），`body` / `html_body` 是空的；完整内容走 `GET /api/mailboxes/{id}/messages/{mid}`。裁剪只发生在 HTTP 层——`store.MessagesForMailbox` 仍返回完整正文，`internal/mailbox/account_inbox.go` 的取码逻辑依赖它，**不要在 store 里做这个裁剪**。实时事件 `mailbox.batch-updated` 的 `payload.messages` 同理不带正文，并且**最多 200 条**（超量时按 `received_at` 倒序截断）；真实入库数看 `created_message_count` / `updated_message_count`，那两个字段不跟着封顶。这么做的原因是：一个三千封的邮箱，带正文的列表响应实测 42 MB、批量载荷也是 42 MB（还会推进 SSE 和 `change_log`），而界面这两处一个正文字段都没用——回填结束后紧接着的那次拉取会因此变成十秒级的白等。要加「列表直接显示摘要」这类功能时，先从 `/messages/{mid}` 取，或另开一个显式请求摘要字段的接口，**不要**把这个字段悄悄加回列表。
 
 ---
 
