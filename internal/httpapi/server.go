@@ -1048,6 +1048,13 @@ func (s *Server) handleMailboxMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := s.store.MessagesForMailbox(r.PathValue("id"))
+	// 列表只渲染主题、发件人和时间，正文按需从 /messages/{messageID} 取。
+	// 一个几千封的邮箱带上全部正文时这份响应是 42 MB，而回填刚结束时前端
+	// 立刻就会拉它——请求本身没错，只是没人需要里面 99% 的字节。
+	for index := range items {
+		items[index].Body = ""
+		items[index].HTMLBody = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "data": map[string]any{"items": items}})
 }
 

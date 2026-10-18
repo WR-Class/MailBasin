@@ -409,10 +409,10 @@ func (s *Store) upsertMessageTx(tx *sql.Tx, mailboxID, remoteID, source, subject
 	return s.upsertMessageDetailedTx(tx, mailboxID, MailboxSyncMessage{
 		RemoteID: remoteID, RemoteIDs: []string{remoteID}, Source: source, Subject: subject, From: from,
 		Body: body, HTMLBody: htmlBody, ContentType: contentType, ReceivedAt: receivedAt,
-	})
+	}, nil)
 }
 
-func (s *Store) upsertMessageDetailedTx(tx *sql.Tx, mailboxID string, incoming MailboxSyncMessage) (domain.Message, bool, domain.Mailbox, []Change, error) {
+func (s *Store) upsertMessageDetailedTx(tx *sql.Tx, mailboxID string, incoming MailboxSyncMessage, index *messageDedupeIndex) (domain.Message, bool, domain.Mailbox, []Change, error) {
 	var mailbox domain.Mailbox
 	if found, err := s.readEntityTx(tx, "mailboxes", mailboxID, &mailbox); err != nil || !found {
 		if err != nil {
@@ -424,19 +424,18 @@ func (s *Store) upsertMessageDetailedTx(tx *sql.Tx, mailboxID string, incoming M
 	canonicalID := strings.TrimSpace(incoming.CanonicalID)
 	remoteIDs := uniqueNonEmptyStrings(append(append([]string(nil), incoming.RemoteIDs...), remoteID))
 	if remoteID != "" || canonicalID != "" {
+		existingID, err := s.findExistingMessageIDTx(tx, mailboxID, index, canonicalID, remoteID)
+		if err != nil {
+			return domain.Message{}, false, mailbox, nil, err
+		}
 		var data []byte
-		err := sql.ErrNoRows
-		if canonicalID != "" {
-			err = tx.QueryRow(`SELECT data_json FROM messages WHERE json_extract(data_json, '$.mailbox_id') = ? AND json_extract(data_json, '$.canonical_id') = ? LIMIT 1`, mailboxID, canonicalID).Scan(&data)
-		}
-		if errors.Is(err, sql.ErrNoRows) && remoteID != "" {
-			err = tx.QueryRow(`SELECT data_json FROM messages WHERE json_extract(data_json, '$.mailbox_id') = ? AND json_extract(data_json, '$.remote_id') = ? LIMIT 1`, mailboxID, remoteID).Scan(&data)
-		}
-		if errors.Is(err, sql.ErrNoRows) && remoteID != "" {
-			err = tx.QueryRow(`SELECT data_json FROM messages
-				WHERE json_extract(data_json, '$.mailbox_id') = ?
-				AND EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(data_json, '$.remote_ids'), '[]')) WHERE value = ?)
-				LIMIT 1`, mailboxID, remoteID).Scan(&data)
+		if existingID != "" {
+			err = tx.QueryRow(`SELECT data_json FROM messages WHERE id = ?`, existingID).Scan(&data)
+			if err != nil {
+				return domain.Message{}, false, mailbox, nil, err
+			}
+		} else {
+			err = sql.ErrNoRows
 		}
 		if err == nil {
 			var existing domain.Message
@@ -473,6 +472,8 @@ func (s *Store) upsertMessageDetailedTx(tx *sql.Tx, mailboxID string, incoming M
 			if err != nil {
 				return domain.Message{}, false, mailbox, nil, err
 			}
+			// 合并进来的新别名要能被本批后续的邮件找到。
+			index.remember(existing)
 			return existing, false, mailbox, []Change{change}, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -500,8 +501,132 @@ func (s *Store) upsertMessageDetailedTx(tx *sql.Tx, mailboxID string, incoming M
 	if err != nil {
 		return domain.Message{}, false, mailbox, nil, err
 	}
+	// 同一批里可能再来一封同样标识的信（IMAP 多文件夹会重复给同一个 UID），
+	// 所以新写入的也要登记进索引，否则本批内的第二封会当成新邮件再存一遍。
+	index.remember(message)
 	mailbox.ReceiveCount++
 	return message, true, mailbox, []Change{change}, nil
+}
+
+// messageDedupeIndex 是一次批量写入期间该邮箱已有邮件的去重索引。
+//
+// 少了它，每封信都要用三条 json_extract 查询去问「这封是不是已经存过」，
+// 而按 remote_id / canonical_id 的两条查询没写偏索引的 WHERE 条件，SQLite 用不上
+// 现成的 idx_messages_remote / idx_messages_canonical 唯一索引，退化成扫该邮箱的
+// 全部邮件：实测一次 121 ms，3134 封回填就是 O(n²) 的二十多分钟，而且整个过程
+// 占着 s.mu 写锁，后台监听和页面请求全部停摆。
+type messageDedupeIndex struct {
+	byCanonical map[string]string
+	byRemoteID  map[string]string
+	// byAlias 存 remote_ids 数组里的别名：同一个远端 UID 在别的文件夹里出现时，
+	// 邮件自己的 remote_id 可能对不上，只有别名对得上。
+	byAlias map[string]string
+}
+
+func newMessageDedupeIndex() *messageDedupeIndex {
+	return &messageDedupeIndex{
+		byCanonical: map[string]string{},
+		byRemoteID:  map[string]string{},
+		byAlias:     map[string]string{},
+	}
+}
+
+func (index *messageDedupeIndex) remember(message domain.Message) {
+	if index == nil {
+		return
+	}
+	id := strings.TrimSpace(message.ID)
+	if id == "" {
+		return
+	}
+	if canonicalID := strings.TrimSpace(message.CanonicalID); canonicalID != "" {
+		index.byCanonical[canonicalID] = id
+	}
+	if remoteID := strings.TrimSpace(message.RemoteID); remoteID != "" {
+		index.byRemoteID[remoteID] = id
+	}
+	for _, alias := range message.RemoteIDs {
+		if alias = strings.TrimSpace(alias); alias != "" {
+			index.byAlias[alias] = id
+		}
+	}
+}
+
+// loadMessageDedupeIndex 一次读出该邮箱所有邮件的去重标识。一封信只读三列，
+// 不读正文，所以这笔开销是 O(n) 的一次扫描，而不是每封信一次。
+func (s *Store) loadMessageDedupeIndex(tx *sql.Tx, mailboxID string) (*messageDedupeIndex, error) {
+	rows, err := tx.Query(`SELECT
+			id,
+			COALESCE(json_extract(data_json, '$.canonical_id'), ''),
+			COALESCE(json_extract(data_json, '$.remote_id'), ''),
+			COALESCE(json_extract(data_json, '$.remote_ids'), '[]')
+		FROM messages WHERE json_extract(data_json, '$.mailbox_id') = ?`, mailboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	index := newMessageDedupeIndex()
+	for rows.Next() {
+		var id, canonicalID, remoteID, rawAliases string
+		if err := rows.Scan(&id, &canonicalID, &remoteID, &rawAliases); err != nil {
+			return nil, err
+		}
+		var aliases []string
+		_ = json.Unmarshal([]byte(rawAliases), &aliases)
+		index.remember(domain.Message{ID: id, CanonicalID: canonicalID, RemoteID: remoteID, RemoteIDs: aliases})
+	}
+	return index, rows.Err()
+}
+
+// findExistingMessageIDTx 找出这封信已经存成了哪一条。有索引就只查内存，
+// 没有索引（单封写入的路径）才退回数据库查询，并且带上偏索引的 WHERE 条件。
+func (s *Store) findExistingMessageIDTx(tx *sql.Tx, mailboxID string, index *messageDedupeIndex, canonicalID, remoteID string) (string, error) {
+	if index != nil {
+		if canonicalID != "" {
+			if id, ok := index.byCanonical[canonicalID]; ok {
+				return id, nil
+			}
+		}
+		if remoteID != "" {
+			if id, ok := index.byRemoteID[remoteID]; ok {
+				return id, nil
+			}
+			if id, ok := index.byAlias[remoteID]; ok {
+				return id, nil
+			}
+		}
+		return "", nil
+	}
+	var id string
+	if canonicalID != "" {
+		err := tx.QueryRow(`SELECT id FROM messages WHERE json_extract(data_json, '$.mailbox_id') = ? AND json_extract(data_json, '$.canonical_id') = ? AND COALESCE(json_extract(data_json, '$.canonical_id'), '') <> '' LIMIT 1`, mailboxID, canonicalID).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+	if remoteID != "" {
+		err := tx.QueryRow(`SELECT id FROM messages WHERE json_extract(data_json, '$.mailbox_id') = ? AND json_extract(data_json, '$.remote_id') = ? AND COALESCE(json_extract(data_json, '$.remote_id'), '') <> '' LIMIT 1`, mailboxID, remoteID).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+		err = tx.QueryRow(`SELECT id FROM messages
+			WHERE json_extract(data_json, '$.mailbox_id') = ?
+			AND EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(data_json, '$.remote_ids'), '[]')) WHERE value = ?)
+			LIMIT 1`, mailboxID, remoteID).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
+	}
+	return "", nil
 }
 
 // ApplyMailboxSyncBatch 使用一个 SQLite 事务写入整组邮箱同步结果，并只发布一条批量 SSE。
@@ -536,10 +661,22 @@ func (s *Store) applyMailboxSyncBatch(updates []MailboxSyncUpdate, stateID strin
 			}
 			return created, errors.New("邮箱不存在")
 		}
+		// 每个邮箱只装载一次去重索引：回填一个几千封的邮箱时，逐封查库会把这个
+		// 事务拖成二十多分钟，而在这期间写锁一直占着，整个应用都停摆。
+		// 没有新邮件的批次（监听器每轮都会推一堆只更新游标的邮箱）不必装载。
+		var index *messageDedupeIndex
+		if len(update.Messages) > 0 {
+			loaded, err := s.loadMessageDedupeIndex(tx, mailbox.ID)
+			if err != nil {
+				_ = tx.Rollback()
+				return created, err
+			}
+			index = loaded
+		}
 		mailboxChanged := false
 		addedForMailbox := 0
 		for _, incoming := range update.Messages {
-			message, added, _, messageChanges, err := s.upsertMessageDetailedTx(tx, mailbox.ID, incoming)
+			message, added, _, messageChanges, err := s.upsertMessageDetailedTx(tx, mailbox.ID, incoming, index)
 			if err != nil {
 				_ = tx.Rollback()
 				return created, err
@@ -589,9 +726,36 @@ func (s *Store) applyMailboxSyncBatch(updates []MailboxSyncUpdate, stateID strin
 		_ = tx.Rollback()
 		return 0, nil
 	}
-	payload, _ := json.Marshal(map[string]any{"operation": "batch-updated", "created_message_count": created, "updated_message_count": updatedMessages, "items": changedMailboxes, "messages": changedMessages})
+	payload, _ := json.Marshal(map[string]any{"operation": "batch-updated", "created_message_count": created, "updated_message_count": updatedMessages, "items": changedMailboxes, "messages": batchPayloadMessages(changedMessages)})
 	change := Change{Type: "mailbox.batch-updated", Resource: "mailbox", ResourceID: "batch", Operation: "batch-updated", Payload: payload, CreatedAt: time.Now()}
 	return created, s.commitTx(tx, []Change{change})
+}
+
+// batchPayloadMessageLimit 是这条批量变更里携带的邮件条数上限。
+//
+// 列表页只拿它来增量补几行，点开某封时还会单独取完整内容；一次回填几千封时
+// 把它们全塞进去没有任何用处，却要让服务端把整份载荷写进 change_log、再推给
+// 每个 SSE 订阅者（实测一条 3134 封的记录是 42 MB）。
+const batchPayloadMessageLimit = 200
+
+// batchPayloadMessages 把变更载荷里的邮件裁成列表要用的样子：去掉正文，
+// 并且只保留收到时间最晚的若干条（列表本身就是按时间倒序显示）。
+func batchPayloadMessages(messages []domain.Message) []domain.Message {
+	if len(messages) > batchPayloadMessageLimit {
+		sorted := make([]domain.Message, len(messages))
+		copy(sorted, messages)
+		sort.SliceStable(sorted, func(left, right int) bool {
+			return sorted[left].ReceivedAt.After(sorted[right].ReceivedAt)
+		})
+		messages = sorted[:batchPayloadMessageLimit]
+	}
+	trimmed := make([]domain.Message, 0, len(messages))
+	for _, message := range messages {
+		message.Body = ""
+		message.HTMLBody = ""
+		trimmed = append(trimmed, message)
+	}
+	return trimmed
 }
 
 func uniqueNonEmptyStrings(values []string) []string {
