@@ -177,7 +177,123 @@ func TestFetchExternalCodeHandlesNonJSONGarbage(t *testing.T) {
 	if err == nil {
 		t.Fatal("既不是 JSON 也不含验证码时应报错")
 	}
-	if code, _, _ := ErrorDetails(err); code != "external_code_unparsable" {
-		t.Fatalf("错误码应为 external_code_unparsable，实际 %q", code)
+	if code, _, _ := ErrorDetails(err); code != "external_code_unparsable" && code != "external_code_html_response" {
+		t.Fatalf("错误码应为 external_code_unparsable 或 external_code_html_response，实际 %q", code)
+	}
+}
+
+// 状态词长得完全符合旧的「4-10 位字母数字」判定，于是被当成验证码交出去。
+// 使用者拿 "success" 去注册会一直失败，而界面告诉他「取到码了」。
+// 这类错误比取不到严重：它伪装成成功。
+func TestFetchExternalCodeNeverReturnsStatusWordAsCode(t *testing.T) {
+	for _, word := range []string{
+		"success", "successful", "pending", "done", "failed", "failure",
+		"error", "errors", "expired", "loading", "waiting", "unknown",
+		"true", "false", "null", "none", "nil", "queued", "ready", "timeout", "retry",
+	} {
+		result, err := fetchFromServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "code": word})
+		})
+		if err != nil {
+			// 报错是可以接受的：它至少没有把状态词当码交出去。
+			continue
+		}
+		if result.Found {
+			t.Fatalf("状态词 %q 被当成了验证码 %q —— 界面会显示「取到码了」，而它根本不是一个码", word, result.Code)
+		}
+	}
+}
+
+// 纯字母串一律不算验证码：真实验证码几乎总含数字，而状态词几乎总是纯字母。
+// 这一条用一个不可能是状态词的纯字母串来断言规则的形状，而不是靠词表兜。
+func TestLooksLikeVerificationCodeRejectsAllLetterStrings(t *testing.T) {
+	for _, candidate := range []string{"abcxyz", "QWERTY", "bear", "hello"} {
+		if looksLikeVerificationCode(candidate) {
+			t.Fatalf("纯字母串 %q 不应被当成验证码", candidate)
+		}
+	}
+	// 反方向：含数字的必须仍然通过，否则收紧过头会把真实取码全废掉。
+	for _, candidate := range []string{"483920", "778899", "ab12cd", "ABCD12", "9f2a"} {
+		if !looksLikeVerificationCode(candidate) {
+			t.Fatalf("含数字的 %q 应被接受为验证码", candidate)
+		}
+	}
+}
+
+// 年份、版本号这类纯数字状态值也在旧的误判范围内（旧判定会接受 "2026"）。
+// 这一档必须诚实：4-10 位纯数字与真实验证码在形状上无法区分，所以长度窗口内的
+// 纯数字只能接受，不能靠收紧判定去排除——真正的防线是「网页不参与抓数字」。
+// 可判定的边界只有长度：超出判定窗口的字符串必须被拒。
+func TestLooksLikeVerificationCodeRejectsOverlongNumericTokens(t *testing.T) {
+	for _, candidate := range []string{"20261018012", "202610180123", "12345678901"} {
+		if looksLikeVerificationCode(candidate) {
+			t.Fatalf("超出长度窗口的数字串 %q 不应被当成验证码", candidate)
+		}
+	}
+	// 反方向：窗口内的纯数字必须接受。这是取舍，不是遗漏——
+	// 真实世界里 6 位纯数字验证码远比 8 位年份日期串常见。
+	for _, candidate := range []string{"483920", "20261018"} {
+		if !looksLikeVerificationCode(candidate) {
+			t.Fatalf("窗口内的数字串 %q 应被接受", candidate)
+		}
+	}
+}
+
+// 这是本次最关键的回归：取码地址配错、或上游把错误页吐回来时，响应是网页。
+// 网页里的轮询间隔、定时器常量、版本号全是数字陷阱，旧的纯文本兜底会把
+// 第一个 4-8 位数字串当成验证码——表现得像一次成功，实际是假码。
+func TestFetchExternalCodeRefusesToMineDigitsFromHTML(t *testing.T) {
+	page := `<!DOCTYPE html>
+<html><head><title>邮件取码</title>
+<script>var POLL_INTERVAL = 5000; setTimeout(refresh, 5000);</script>
+</head><body><div id="code">暂无验证码</div>
+<p>页面每 5000 毫秒刷新一次</p></body></html>`
+	result, err := fetchFromServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(page))
+	})
+	if err == nil {
+		t.Fatalf("网页响应必须报错，不能把页面里的数字当成验证码；实际返回 found=%t code=%q", result.Found, result.Code)
+	}
+	if result.Code != "" {
+		t.Fatalf("网页响应绝不应产出验证码，实际 %q", result.Code)
+	}
+	if code, _, _ := ErrorDetails(err); code != "external_code_html_response" {
+		t.Fatalf("错误码应为 external_code_html_response，实际 %q", code)
+	}
+}
+
+// Content-Type 说不是 HTML、但正文明显是网页时同样必须拦住。
+// 只信 Content-Type 是不够的：配错的端点经常把网页当 text/plain 发。
+func TestFetchExternalCodeDetectsHTMLWithoutContentType(t *testing.T) {
+	for _, body := range []string{
+		"<!DOCTYPE html><html><body>5000</body></html>",
+		"<html><head></head><body><p>4294967296</p></body></html>",
+		"  \n <body>123456</body>",
+	} {
+		result, err := fetchFromServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte(body))
+		})
+		if err == nil {
+			t.Fatalf("没有 Content-Type 但正文是网页时也必须报错，否则 %q 会变成假验证码", body)
+		}
+		if result.Code != "" {
+			t.Fatalf("网页正文不应产出验证码，实际 %q", result.Code)
+		}
+	}
+}
+
+// 收紧不能把真正的纯文本取码废掉——这是上一条的对偶断言。
+func TestFetchExternalCodeStillAcceptsGenuinePlainTextCode(t *testing.T) {
+	result, err := fetchFromServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("your code is 483920"))
+	})
+	if err != nil {
+		t.Fatalf("纯文本取码不应被收紧误伤：%v", err)
+	}
+	if !result.Found || result.Code != "483920" {
+		t.Fatalf("应从纯文本取到 483920，实际 %+v", result)
 	}
 }

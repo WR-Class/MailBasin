@@ -105,17 +105,38 @@ func FetchExternalCode(ctx context.Context, client *http.Client, endpoint string
 		return ExternalCodeResult{}, errCode("external_code_http_error",
 			fmt.Sprintf("取码接口返回 HTTP %d", response.StatusCode), response.StatusCode >= 500)
 	}
-	return parseExternalCodeBody(body)
+	return parseExternalCodeBodyWithType(body, response.Header.Get("Content-Type"))
+}
+
+// isHTMLContentType 判断 Content-Type 是不是网页。
+func isHTMLContentType(contentType string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(contentType))
+	return strings.HasPrefix(lowered, "text/html") || strings.HasPrefix(lowered, "application/xhtml")
 }
 
 // parseExternalCodeBody 解析取码响应，优先用规范形状，再退回顶层 code。
 func parseExternalCodeBody(body []byte) (ExternalCodeResult, error) {
+	return parseExternalCodeBodyWithType(body, "")
+}
+
+// parseExternalCodeBodyWithType 与 parseExternalCodeBody 相同，但知道响应的 Content-Type。
+//
+// contentType 只用来排除一种情况：响应其实是个网页。网页绝不参与「从自由文本里抓
+// 第一个数字串」这条兜底——那条规则是为纯文本验证码写的，用在网页上只会把页面里的
+// 定时器常量当验证码交出去，而且表现得像一次成功。
+func parseExternalCodeBodyWithType(body []byte, contentType string) (ExternalCodeResult, error) {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		return ExternalCodeResult{}, errCode("external_code_empty_response", "取码接口返回了空响应", true)
 	}
 	var envelope externalCodeEnvelope
 	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		// 走到这里说明不是 JSON。先分清「这是个网页」和「这是纯文本验证码」——
+		// 两者的处理完全不同，而网页里的数字几乎总是陷阱。
+		if isHTMLContentType(contentType) || looksLikeHTMLResponse(trimmed) {
+			return ExternalCodeResult{}, errCode("external_code_html_response",
+				"取码接口返回的是网页而不是验证码，请在设置里改成一个返回 JSON 或纯文本的取码地址（当前地址可能指向了页面而不是接口）", false)
+		}
 		// 有些端点直接回纯文本验证码，这也是可用的。
 		if code := firstVerificationCode(trimmed); code != "" {
 			return ExternalCodeResult{Found: true, Code: code}, nil
@@ -155,17 +176,85 @@ func parseExternalCodeBody(body []byte) (ExternalCodeResult, error) {
 	return ExternalCodeResult{Found: true, Code: code}, nil
 }
 
-// looksLikeVerificationCode 判断一个字符串是否像验证码：纯数字或纯字母数字，长度 4 到 10。
+// externalCodeStatusWords 是「长得像验证码、其实是状态词」的取值。
+//
+// 这些词全部是 4~10 位纯字母，正好落在 looksLikeVerificationCode 的长度与字符集
+// 窗口里：success、pending、done、failed、expired……一个只看字符集的判定会把它们
+// 当成验证码交给使用者，而界面会显示「取到码了」。这类错误比「取不到」严重得多：
+// 使用者拿一个假码去注册，会一直卡在验证失败，根本想不到是取码工具骗了他。
+var externalCodeStatusWords = map[string]bool{
+	"success":    true,
+	"successful": true,
+	"pending":    true,
+	"done":       true,
+	"failed":     true,
+	"failure":    true,
+	"error":      true,
+	"errors":     true,
+	"true":       true,
+	"false":      true,
+	"null":       true,
+	"none":       true,
+	"nil":        true,
+	"ok":         true,
+	"expired":    true,
+	"loading":    true,
+	"waiting":    true,
+	"unknown":    true,
+	"empty":      true,
+	"retry":      true,
+	"timeout":    true,
+	"queued":     true,
+	"ready":      true,
+}
+
+// looksLikeVerificationCode 判断一个字符串是否像验证码。
+//
+// 除了长度 4 到 10、只含字母数字之外，还要求**至少含一个数字**：真实验证码几乎
+// 总是数字或字母加数字，而状态词几乎总是纯字母。同时显式排除已知状态词，兜住
+// 将来出现的、含数字的状态词（例如 http2xx 这类）。
+//
+// 这条收紧是必要的：原来的实现只看字符集，于是 "success"、"pending"、"2026"
+// 全部通过——前两个是状态词，第三个是年份。宁可如实报告「这个响应里没有码」，
+// 也不能把状态词交给使用者去注册。
 func looksLikeVerificationCode(value string) bool {
 	if len(value) < 4 || len(value) > 10 {
 		return false
 	}
+	hasDigit := false
 	for _, char := range value {
-		if (char < '0' || char > '9') && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') {
+		switch {
+		case char >= '0' && char <= '9':
+			hasDigit = true
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		default:
 			return false
 		}
 	}
-	return true
+	if !hasDigit {
+		return false
+	}
+	return !externalCodeStatusWords[strings.ToLower(value)]
+}
+
+// looksLikeHTMLResponse 判断响应正文是不是一个网页。
+//
+// 取码接口应该回 JSON 或纯文本，但配置错了、地址写成了管理页、或者上游把错误页
+// 直接吐回来时，会拿到 HTML。HTML 里到处是数字陷阱：轮询间隔、定时器常量、
+// 版本号、内联脚本里的毫秒数。这些数字一旦落进 firstVerificationCode，就会变成
+// 一个看起来完全合法、实际毫无意义的验证码。
+func looksLikeHTMLResponse(body string) bool {
+	head := body
+	if len(head) > 512 {
+		head = head[:512]
+	}
+	lowered := strings.ToLower(strings.TrimSpace(head))
+	return strings.HasPrefix(lowered, "<!doctype") ||
+		strings.HasPrefix(lowered, "<html") ||
+		strings.HasPrefix(lowered, "<?xml") ||
+		strings.Contains(lowered, "<head") ||
+		strings.Contains(lowered, "<body")
 }
 
 // firstVerificationCode 从一段自由文本里抓出第一个连续 4 到 8 位数字。
